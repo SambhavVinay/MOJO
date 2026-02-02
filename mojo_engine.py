@@ -11,6 +11,7 @@ import win32gui
 import win32process
 import psutil
 import win32con
+import time
 
 class MojoApp:
     def __init__(self):
@@ -68,34 +69,35 @@ class MojoApp:
             img.thumbnail((500, 500)) 
             img.save("screen_small.png")
     
-    def force_close_distractions(self, exe_name):
+    def force_close_distractions(self, exe_name, target_hwnd=None): # Added target_hwnd
         try:
-            # SAFETY LIST: Never kill these
             protected_exes = ["python.exe", "explorer.exe", "taskmgr.exe"]
             if exe_name and exe_name.lower() in protected_exes:
                 return
 
+            # If no specific hwnd was passed, get the current one
+            hwnd = target_hwnd if target_hwnd else win32gui.GetForegroundWindow()
+            
             self.text_label.config(text="ENFORCING...", fg="red")
             self.root.update()
             
-            title = self.get_active_window_title().lower()
+            title = win32gui.GetWindowText(hwnd).lower()
             browsers = ["firefox", "chrome", "edge", "brave", "browser"]
-            
             is_browser = any(b in (exe_name or "").lower() for b in browsers) or \
-                         any(b in title for b in browsers)
+                        any(b in title for b in browsers)
 
             if is_browser:
-                # Targeted Tab Closing: Focus browser first, then send keys
-                hwnd = win32gui.GetForegroundWindow()
+                # FORCE focus back to the browser so it can receive Ctrl+W
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
                 win32gui.SetForegroundWindow(hwnd)
-                time.sleep(0.1)
+                time.sleep(0.3) # Slightly longer delay to ensure focus
+                
                 pyautogui.hotkey('ctrl', 'w') 
                 print(f"Sent Ctrl+W to browser: {exe_name}")
             else:
-                # Kill standalone apps
                 subprocess.run(["taskkill", "/F", "/IM", exe_name], capture_output=True, check=False)
                 print(f"Taskkilled app: {exe_name}")
-            
+                
         except Exception as e:
             print(f"Enforcement error: {e}")
 
@@ -108,10 +110,13 @@ class MojoApp:
 
     def interrogate(self, target_exe):
         if self.is_interrogating: return
-        
+    
+    # CAPTURE THE DISTRACTING WINDOW ID NOW
+        distraction_hwnd = win32gui.GetForegroundWindow()
+    
         self.is_interrogating = True
         self.status_label.config(text="❓", fg="yellow")
-        
+    
         self.dialog_win = tk.Toplevel(self.root)
         self.dialog_win.title("Mojo Interrogation")
         self.dialog_win.attributes("-topmost", True)
@@ -125,14 +130,14 @@ class MojoApp:
         def submit():
             reason = entry.get()
             if not reason or not self.verify_reason(reason):
-                self.force_close_distractions(target_exe)
+                # PASS THE CAPTURED HWND HERE
+                self.force_close_distractions(target_exe, distraction_hwnd)
             else:
                 self.grace_period_until = time.time() + 300
             self.close_dialog()
 
         tk.Button(self.dialog_win, text="Submit", command=submit).pack(pady=10)
         self.dialog_win.protocol("WM_DELETE_WINDOW", self.close_dialog)
-
     def close_dialog(self):
         if self.dialog_win:
             self.dialog_win.destroy()
