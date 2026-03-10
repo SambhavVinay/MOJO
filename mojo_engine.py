@@ -3,7 +3,7 @@ import threading
 import mss
 import ollama
 import time
-from PIL import Image
+from PIL import Image,ImageTk
 import os
 import subprocess
 import pyautogui
@@ -12,6 +12,7 @@ import win32process
 import psutil
 import win32con
 import time
+ 
 
 class MojoApp:
     def __init__(self):
@@ -19,27 +20,60 @@ class MojoApp:
         self.root.title("Mojo") 
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
-        self.root.geometry("250x150+1300+700") 
-        self.root.config(bg='black')
-        self.root.attributes("-alpha", 0.9)
-
-        self.status_label = tk.Label(self.root, text="👁️", font=("Arial", 40), bg='black', fg='white')
-        self.status_label.pack()
         
-        self.text_label = tk.Label(self.root, text="System Online", font=("Arial", 10), bg='black', fg='white')
-        self.text_label.pack()
+        # Set a color to be completely transparent
+        self.bg_color = '#000001' # Almost black, used as transparency key
+        self.root.config(bg=self.bg_color)
+        self.root.attributes("-transparentcolor", self.bg_color)
+        
+        self.root.geometry("250x250+1300+700") 
 
-        # State management
+        # --- DRAGGABLE LOGIC ---
+        self._offsetx = 0
+        self._offsety = 0
+        self.root.bind('<Button-1>', self.start_drag)
+        self.root.bind('<B1-Motion>', self.on_drag)
+
+        # --- GLOWING ORB UI ---
+        # 1. Load the Glow Image (You need a glowing circle PNG with transparency)
+        try:
+            self.orb_image = Image.open("orb.png").resize((200, 200), Image.Resampling.LANCZOS)
+            self.orb_photo = ImageTk.PhotoImage(self.orb_image)
+            
+            self.bg_label = tk.Label(self.root, image=self.orb_photo, bg=self.bg_color)
+            self.bg_label.place(x=25, y=25) # Center the 200px orb in the 250px window
+            
+            # Re-bind drag to the background image so you can grab the orb itself
+            self.bg_label.bind('<Button-1>', self.start_drag)
+            self.bg_label.bind('<B1-Motion>', self.on_drag)
+        except Exception as e:
+            print(f"Image load error: {e}. Falling back to basic circle.")
+
+        # 2. Status Icon (centered inside the orb)
+        self.status_label = tk.Label(self.root, text="🔥", font=("Arial", 40), bg='#1a1a1a', fg="lime")
+        # Note: 'bg' should match the center color of your orb image for a seamless look
+        self.status_label.place(relx=0.5, rely=0.45, anchor='center')
+        
+        self.text_label = tk.Label(self.root, text="LOCKED IN", font=("Arial", 10, "bold"), bg='#1a1a1a', fg="white")
+        self.text_label.place(relx=0.5, rely=0.65, anchor='center')
+
+        # ... (Rest of your original logic: interrogation, vision_loop, etc.) ...
         self.is_interrogating = False
         self.grace_period_until = 0  
-        self.dialog_win = None 
-
         self.monitor_thread = threading.Thread(target=self.vision_loop, daemon=True)
         self.monitor_thread.start()
 
-        # Keep the window on top every 5 seconds
         self.refresh_topmost()
         self.root.mainloop()
+
+    def start_drag(self, event):
+        self._offsetx = event.x
+        self._offsety = event.y
+
+    def on_drag(self, event):
+        x = self.root.winfo_x() + event.x - self._offsetx
+        y = self.root.winfo_y() + event.y - self._offsety
+        self.root.geometry(f"+{x}+{y}")
 
     def refresh_topmost(self):
         """Ensures the window stays on top of everything else permanently."""
