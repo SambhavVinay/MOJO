@@ -19,7 +19,7 @@ pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tessera
 USER_GOAL = "Software Development, Python Coding, and AI Research, General Productivity, Note Taking, Time Management, "
 
 WHITELISTED_EXES = ["powershell.exe", "pwsh.exe", "cmd.exe", "code.exe", "cursor.exe", "python.exe", "pycharm64.exe", "SearchHost.exe", "WhatsApp.exe", "obs64.exe", "WindowsTerminal.exe"]
-WHITELISTED_TITLES = ["gemini", "chatgpt", "github", "stackoverflow", "documentation", "localhost", "SearchHost", "visual studio code", "terminal"]
+WHITELISTED_TITLES = ["gemini", "chatgpt", "github", "stackoverflow", "documentation", "localhost", "SearchHost", "visual studio code", "terminal", "powershell"]
 
 class MojoApp:
     def __init__(self):
@@ -135,15 +135,27 @@ class MojoApp:
 
             print("DECISION: EVALUATING WITH AI...")
             prompt = (
-                f"SYSTEM: You are a strict productivity monitor. Focus ONLY on the ACTIVE window.\n"
+                "SYSTEM: You are a strict productivity monitor.\n"
+                "You ONLY judge the SINGLE ACTIVE BROWSER TAB that is currently visible.\n"
+                "Ignore all other tabs, bookmarks, sidebars, or background windows.\n\n"
                 f"USER GOAL: {USER_GOAL}\n"
                 f"ACTIVE WINDOW TITLE: {current_title}\n"
-                f"VISIBLE TAB TEXT: {tab_titles[:150]}\n\n"
-                f"RULES:\n"
-                f"1. If the window is a browser, judge ONLY by the active tab/URL content.\n"
-                f"2. Email, Netflix, Social Media, and Games are DISTRACTED.\n"
-                f"3. Coding, AI Research, and Documentation are PRODUCTIVE.\n"
-                f"OUTPUT: 'REASON: <1 sentence> | STATUS: <PRODUCTIVE/DISTRACTED>'"
+                f"ACTIVE TAB/TOP-BAR TEXT (OCR): {tab_titles[:220]}\n\n"
+                "PRODUCTIVE EXAMPLES (treat as PRODUCTIVE when clearly related):\n"
+                "- IDEs, terminals, code editors, GitHub, documentation, StackOverflow, research papers,\n"
+                "- AI tools (ChatGPT, Gemini, Claude, local LLM frontends) used for coding or research,\n"
+                "- Developer dashboards, monitoring tools, technical blogs and tutorials.\n\n"
+                "DISTRACTED EXAMPLES (treat as DISTRACTED when clearly the main purpose):\n"
+                "- Entertainment: YouTube/Netflix/Prime for movies, shows, music videos,\n"
+                "- Social media: Twitter/X, Instagram, TikTok, Facebook, Reddit for browsing,\n"
+                "- Shopping: Amazon, Flipkart and similar ecommerce browsing not clearly work-related,\n"
+                "- Random news, celebrity gossip, meme sites.\n\n"
+                "RULES:\n"
+                "1. If this is a browser, decide ONLY from the active tab content and URL text.\n"
+                "2. If the tab clearly supports the user goal, call it PRODUCTIVE.\n"
+                "3. If the tab is mainly entertainment, social, shopping or idle browsing, call it DISTRACTED.\n"
+                "4. When in doubt, slightly bias toward PRODUCTIVE for docs, code, or AI tools.\n"
+                "OUTPUT: 'REASON: <very short reason> | STATUS: <PRODUCTIVE/DISTRACTED>'"
             )
 
             try:
@@ -188,20 +200,8 @@ class MojoApp:
         self.root.after(100, lambda: self._show_interrogate_dialog(target_exe, target_hwnd))
 
     def _show_interrogate_dialog(self, target_exe, target_hwnd):
-        self.control_panel = tk.Toplevel(self.root)
-        self.control_panel.overrideredirect(True)
-        self.control_panel.attributes("-topmost", True)
-        self.control_panel.geometry("300x60+1300+630") 
-        self.control_panel.config(bg="#1a1a1a")
-
         def cleanup():
-            # 1. Kill button panel
-            if self.control_panel: 
-                try: self.control_panel.destroy()
-                except: pass
-                self.control_panel = None
-            
-            # 2. Kill MojoUI chat
+            # Close MojoUI chat window, if any
             if hasattr(self.ui, 'close_interrogation_dialog'):
                 try: self.ui.close_interrogation_dialog()
                 except: pass
@@ -212,46 +212,25 @@ class MojoApp:
             print("CLEANUP: All interrogation windows closed.")
 
         def give_grace():
-            print("USER ACTION: GRACE PERIOD GRANTED")
+            print("AGENT DECISION: GRANT ACCESS (1 minute)")
             self.grace_period_until = time.time() + 60
             cleanup()
-
-        def force_kill():
-            print(f"USER ACTION: KILLING {target_exe}")
-            self.force_close_distractions(target_exe, target_hwnd)
-            cleanup()
-
-        def poll_target_window():
-            if not self.is_interrogating:
-                return
-            try:
-                window_still_open = bool(target_hwnd) and win32gui.IsWindow(target_hwnd)
-            except Exception:
-                window_still_open = False
-
-            if not window_still_open:
-                print("TARGET WINDOW CLOSED: Auto-closing interrogation/chat UI.")
-                cleanup()
-                return
-
-            self.root.after(1000, poll_target_window)
-
-        tk.Button(self.control_panel, text="Wait! 1m Grace", command=give_grace, bg="cyan", fg="black", font=("Arial", 10, "bold")).pack(side="left", expand=True, fill="both", padx=2, pady=2)
-        tk.Button(self.control_panel, text=f"Kill {target_exe}", command=force_kill, bg="red", fg="white", font=("Arial", 10, "bold")).pack(side="right", expand=True, fill="both", padx=2, pady=2)
 
         try:
             self.ui.show_interrogation_dialog(
                 target_exe, target_hwnd,
+                # LLM inside MojoUI decides: GRANT_ACCESS vs DENY_ACCESS.
                 on_valid_reason=lambda r: give_grace(),
-                on_invalid=lambda e, h: force_kill(),
+                on_invalid=lambda exe, hwnd: (
+                    print(f"AGENT DECISION: DENY ACCESS, closing {exe or target_exe}"),
+                    self.force_close_distractions(exe or target_exe, hwnd or target_hwnd),
+                    cleanup()
+                ),
                 on_close=cleanup
             )
         except Exception as e:
             print(f"UI Launch Error: {e}")
             cleanup()
-
-        # Start watching for the user manually closing the distracted app/tab.
-        self.root.after(1000, poll_target_window)
 
 if __name__ == "__main__":
     MojoApp()

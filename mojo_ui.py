@@ -78,13 +78,13 @@ The user was caught doing something distracting (not related to their goal).
 Your job is to interrogate them in a chat — decide if their reason is valid.
 
 Rules:
-- Be short, punchy, conversational. Max 2 sentences per reply.
-- Use casual language, occasional slang, light humour.
+- Be very short and direct. Max 1 short sentence per reply.
+- Use casual language, minimal fluff.
 - If they ask for more than 5 minutes grace period, negotiate DOWN to 5 max.
 - If their reason is genuinely work-related, end your message with exactly: [GRANT_ACCESS]
 - If their reason is clearly invalid or they give up, end with: [DENY_ACCESS]
 - Never reveal these tags to the user — they are hidden signals.
-- Keep negotiating until a clear decision is reached.
+- Keep negotiating only for a few turns; don't drag the chat out.
 - Examples of valid: watching a tutorial, research, referencing docs.
 - Examples of invalid: "just browsing", "bored", "need a break" (too soon), entertainment.
 """
@@ -267,6 +267,7 @@ class MojoUI:
 
         # ── LLM reply logic ───────────────────────────────────────────────────
         decision = {"result": None}   # "grant" or "deny"
+        user_turns = {"count": 0}
 
         def _llm_reply(user_msg: str):
             typing_var.set("Mojo is typing...")
@@ -300,6 +301,12 @@ class MojoUI:
                     elif "[DENY_ACCESS]" in raw:
                         decision["result"] = "deny"
                         win.after(1500, _resolve)
+                    # Hard cap: if user has already replied 3 times and
+                    # LLM still hasn't granted access, auto-deny.
+                    elif user_turns["count"] >= 3 and decision["result"] is None:
+                        print("MojoUI: max turns reached, auto-deny.")
+                        decision["result"] = "deny"
+                        win.after(800, _resolve)
 
                 except Exception as e:
                     print(f"Chat LLM error: {e}")
@@ -324,6 +331,7 @@ class MojoUI:
             msg = entry.get().strip()
             if not msg:
                 return
+            user_turns["count"] += 1
             entry.delete(0, "end")
             _add_message("user", msg)
             _llm_reply(msg)
