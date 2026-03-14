@@ -10,16 +10,16 @@ import win32process
 import psutil
 import win32con
 import pytesseract
-from PIL import Image          # ImageTk removed — no longer needed
+from PIL import Image
 
-from mojo_ui import MojoUI    # ← only new import
+from mojo_ui import MojoUI 
 
 # --- CONFIGURATION ---
 pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 USER_GOAL = "Software Development, Python Coding, and AI Research, General Productivity, Note Taking, Time Management, "
 
-WHITELISTED_EXES = ["powershell.exe", "cmd.exe", "code.exe", "cursor.exe", "python.exe", "pycharm64.exe","SearchHost.exe","WhatsApp.exe","obs64.exe"]
-WHITELISTED_TITLES = ["gemini", "chatgpt", "github", "stackoverflow", "documentation", "localhost", "SearchHost"]
+WHITELISTED_EXES = ["powershell.exe", "pwsh.exe", "cmd.exe", "code.exe", "cursor.exe", "python.exe", "pycharm64.exe", "SearchHost.exe", "WhatsApp.exe", "obs64.exe", "WindowsTerminal.exe"]
+WHITELISTED_TITLES = ["gemini", "chatgpt", "github", "stackoverflow", "documentation", "localhost", "SearchHost", "visual studio code", "terminal"]
 
 class MojoApp:
     def __init__(self):
@@ -38,12 +38,14 @@ class MojoApp:
         self.root.bind('<Button-1>', self.start_drag)
         self.root.bind('<B1-Motion>', self.on_drag)
 
-        # ── UI: replaces old orb image + status_label + text_label ──
-        self.ui = MojoUI(self.root, self.bg_color)   # ← NEW
+        self.ui = MojoUI(self.root, self.bg_color)
 
         self.is_interrogating = False
         self.grace_period_until = 0
-        self.dialog_win = None
+        self.control_panel = None 
+
+        print("--- MOJO INITIALIZED ---")
+        print(f"Goal: {USER_GOAL}\n")
 
         self.monitor_thread = threading.Thread(target=self.vision_loop, daemon=True)
         self.monitor_thread.start()
@@ -59,7 +61,7 @@ class MojoApp:
         x = self.root.winfo_x() + event.x - self._offsetx
         y = self.root.winfo_y() + event.y - self._offsety
         self.root.geometry(f"+{x}+{y}")
-        self.ui.reposition_bubbles()   # ← NEW: bubbles follow orb
+        self.ui.reposition_bubbles()
 
     def refresh_topmost(self):
         self.root.attributes("-topmost", True)
@@ -83,100 +85,91 @@ class MojoApp:
             sct.shot(output="temp_screen.png")
             img = Image.open("temp_screen.png")
             width, height = img.size
-            tab_area = img.crop((0, 0, width, 80))
+            
+            # Focused Crop: Focus on the top 500px (Tabs/URL) and center
+            # This prevents AI from seeing background windows.
+            focused_area = img.crop((0, 0, width, 600)) 
+            focused_area.save("vision_input.png")
 
+            tab_area = img.crop((0, 0, width, 80))
             try:
-                full_text = pytesseract.image_to_string(img).strip()
                 tab_text = pytesseract.image_to_string(tab_area).strip()
             except:
-                full_text = ""
                 tab_text = ""
-
-            img.thumbnail((800, 800))
-            img.save("vision_input.png")
-            return tab_text, full_text
+            return tab_text
 
     def vision_loop(self):
         while True:
-            # Pause vision loop if we are currently handling a distraction
             if self.is_interrogating:
                 time.sleep(1)
                 continue
 
             if time.time() < self.grace_period_until:
-                self.update_ui("⏳", "GRACE PERIOD", "cyan", "white")
+                rem = int(self.grace_period_until - time.time())
+                self.update_ui("⏳", f"GRACE ({rem}s)", "cyan", "white")
                 time.sleep(2)
                 continue
 
             current_title = self.get_active_window_title()
             current_exe = self.get_active_app_info()
             current_hwnd = win32gui.GetForegroundWindow()
+            tab_titles = self.get_screen_data()
 
-            tab_titles, screen_content = self.get_screen_data()
-
-            # --- TERMINAL LOGGING ---
-            print("-" * 50)
-            print(f"[{time.strftime('%H:%M:%S')}] SCANNING...")
-            print(f"ACTIVE WINDOW: {current_title} ({current_exe})")
-            if tab_titles:
-                print(f"DETECTED TABS: {tab_titles.replace(chr(10), ' | ')}")
-            print("-" * 50)
-
-            # --- STEP 1: HARD WHITELIST CHECK ---
             low_title = current_title.lower()
-            is_productive_exe = current_exe and current_exe.lower() in WHITELISTED_EXES
-            is_productive_title = any(wt in low_title for wt in WHITELISTED_TITLES)
+            exe_low = current_exe.lower() if current_exe else ""
+            
+            print("-" * 30)
+            print(f"APP: {current_exe} | WINDOW: {current_title}")
 
-            if is_productive_exe or is_productive_title:
+            if exe_low in WHITELISTED_EXES or any(wt in low_title for wt in WHITELISTED_TITLES):
+                print("DECISION: PRODUCTIVE (Whitelisted ✅)")
                 self.update_ui("🔥", "LOCKED IN", "lime", "white")
                 time.sleep(3)
                 continue
 
-            # Skip system apps
-            ignored = ["mojo", "tk", "explorer.exe", "task manager", "settings", "search host","WhatsApp","SearchHost"]
-            if any(x in low_title for x in ignored) or (current_exe and current_exe.lower() in ignored):
+            ignored = ["mojo", "tk", "explorer.exe", "task manager", "settings", "search host", "searchhost"]
+            if any(x in low_title for x in ignored) or exe_low in ignored:
+                print("DECISION: IGNORED (System ⚙️)")
                 time.sleep(1)
                 continue
 
-            # --- STEP 2: LLM ANALYSIS ---
-            prompt = f"""Identify if the user is distracted.
-            USER GOAL: {USER_GOAL}
-            ACTIVE WINDOW: {current_title}
-            DETECTED TABS/TEXT: {tab_titles}
-            
-            Answer 'STATUS: PRODUCTIVE' if the window/tabs support the goal.
-            Answer 'STATUS: DISTRACTED' if it is social media, shopping, or non-educational entertainment.
-            
-            ONLY reply with the STATUS line."""
+            print("DECISION: EVALUATING WITH AI...")
+            prompt = (
+                f"SYSTEM: You are a strict productivity monitor. Focus ONLY on the ACTIVE window.\n"
+                f"USER GOAL: {USER_GOAL}\n"
+                f"ACTIVE WINDOW TITLE: {current_title}\n"
+                f"VISIBLE TAB TEXT: {tab_titles[:150]}\n\n"
+                f"RULES:\n"
+                f"1. If the window is a browser, judge ONLY by the active tab/URL content.\n"
+                f"2. Email, Netflix, Social Media, and Games are DISTRACTED.\n"
+                f"3. Coding, AI Research, and Documentation are PRODUCTIVE.\n"
+                f"OUTPUT: 'REASON: <1 sentence> | STATUS: <PRODUCTIVE/DISTRACTED>'"
+            )
 
             try:
-                response = ollama.chat(
-                    model='llava',
-                    messages=[{'role': 'user', 'content': prompt, 'images': ['vision_input.png']}],
-                    options={'temperature': 0}
-                )
-                raw = response['message']['content'].upper()
+                response = ollama.chat(model='llava', messages=[{'role': 'user', 'content': prompt, 'images': ['vision_input.png']}], options={'temperature': 0})
+                result = response['message']['content'].upper()
+                print(f"AI ANALYSIS: {result.strip()}")
 
-                if "PRODUCTIVE" in raw and "DISTRACTED" not in raw:
-                    self.update_ui("🔥", "LOCKED IN", "lime", "white")
-                else:
-                    print(f"!!! DISTRACTION TRIGGERED !!! -> {current_title}")
+                if "STATUS: PRODUCTIVE" not in result:
+                    print(f"RESULT: DISTRACTED 🚫")
                     self.update_ui("🚫", "DISTRACTED", "red", "red")
                     self.interrogate(current_exe, current_hwnd)
-
+                else:
+                    print("RESULT: PRODUCTIVE 🔥")
+                    self.update_ui("🔥", "LOCKED IN", "lime", "white")
             except Exception as e:
                 print(f"LLM Error: {e}")
 
             time.sleep(2)
 
-    # ── UI update: forwards to MojoUI instead of old labels ──
     def update_ui(self, icon, text, icon_color, text_color):
-        self.ui.update_state(text)   # ← NEW (replaces status_label + text_label)
+        self.ui.update_state(text)
 
     def force_close_distractions(self, exe_name, target_hwnd):
         try:
             if not target_hwnd or not win32gui.IsWindow(target_hwnd): return
-
+            print(f"FORCING CLOSE: {exe_name}")
             browsers = ["chrome.exe", "msedge.exe", "brave.exe", "firefox.exe"]
             if exe_name and exe_name.lower() in browsers:
                 win32gui.ShowWindow(target_hwnd, win32con.SW_RESTORE)
@@ -184,11 +177,8 @@ class MojoApp:
                 time.sleep(0.1)
                 pyautogui.hotkey("ctrl", "w")
             else:
-                subprocess.run(
-                    ["taskkill", "/F", "/PID",
-                     str(psutil.Process(win32process.GetWindowThreadProcessId(target_hwnd)[1]).pid)],
-                    capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW
-                )
+                pid = win32process.GetWindowThreadProcessId(target_hwnd)[1]
+                subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
         except Exception as e:
             print(f"Close failed: {e}")
 
@@ -197,29 +187,71 @@ class MojoApp:
         self.is_interrogating = True
         self.root.after(100, lambda: self._show_interrogate_dialog(target_exe, target_hwnd))
 
-    # ── Dialog: now a chat UI via MojoUI instead of the old form ──
     def _show_interrogate_dialog(self, target_exe, target_hwnd):
+        self.control_panel = tk.Toplevel(self.root)
+        self.control_panel.overrideredirect(True)
+        self.control_panel.attributes("-topmost", True)
+        self.control_panel.geometry("300x60+1300+630") 
+        self.control_panel.config(bg="#1a1a1a")
 
-        def on_valid_reason(_reason):
-            print("Reason accepted. Grace period granted.")
-            self.grace_period_until = time.time() + 300   # ← same 300s as original
-            return True
-
-        def on_invalid(exe, hwnd):
-            print(f"Reason rejected. Closing {exe}")
-            self.force_close_distractions(exe, hwnd)
-
-        def on_close():
+        def cleanup():
+            # 1. Kill button panel
+            if self.control_panel: 
+                try: self.control_panel.destroy()
+                except: pass
+                self.control_panel = None
+            
+            # 2. Kill MojoUI chat
+            if hasattr(self.ui, 'close_interrogation_dialog'):
+                try: self.ui.close_interrogation_dialog()
+                except: pass
+            
+            # 3. Reset Flag
             self.is_interrogating = False
-            self.dialog_win = None
             self.update_ui("🔥", "LOCKED IN", "lime", "white")
+            print("CLEANUP: All interrogation windows closed.")
 
-        self.dialog_win = self.ui.show_interrogation_dialog(
-            target_exe, target_hwnd,
-            on_valid_reason=on_valid_reason,
-            on_invalid=on_invalid,
-            on_close=on_close,
-        )
+        def give_grace():
+            print("USER ACTION: GRACE PERIOD GRANTED")
+            self.grace_period_until = time.time() + 60
+            cleanup()
+
+        def force_kill():
+            print(f"USER ACTION: KILLING {target_exe}")
+            self.force_close_distractions(target_exe, target_hwnd)
+            cleanup()
+
+        def poll_target_window():
+            if not self.is_interrogating:
+                return
+            try:
+                window_still_open = bool(target_hwnd) and win32gui.IsWindow(target_hwnd)
+            except Exception:
+                window_still_open = False
+
+            if not window_still_open:
+                print("TARGET WINDOW CLOSED: Auto-closing interrogation/chat UI.")
+                cleanup()
+                return
+
+            self.root.after(1000, poll_target_window)
+
+        tk.Button(self.control_panel, text="Wait! 1m Grace", command=give_grace, bg="cyan", fg="black", font=("Arial", 10, "bold")).pack(side="left", expand=True, fill="both", padx=2, pady=2)
+        tk.Button(self.control_panel, text=f"Kill {target_exe}", command=force_kill, bg="red", fg="white", font=("Arial", 10, "bold")).pack(side="right", expand=True, fill="both", padx=2, pady=2)
+
+        try:
+            self.ui.show_interrogation_dialog(
+                target_exe, target_hwnd,
+                on_valid_reason=lambda r: give_grace(),
+                on_invalid=lambda e, h: force_kill(),
+                on_close=cleanup
+            )
+        except Exception as e:
+            print(f"UI Launch Error: {e}")
+            cleanup()
+
+        # Start watching for the user manually closing the distracted app/tab.
+        self.root.after(1000, poll_target_window)
 
 if __name__ == "__main__":
     MojoApp()
