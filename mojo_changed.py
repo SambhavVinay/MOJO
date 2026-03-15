@@ -212,22 +212,45 @@ class MojoApp:
 
     def _fallback_productive_check(self, window_title: str, tab_text: str) -> bool:
         """When API is unavailable, use simple keyword heuristics. Returns True if productive."""
+
         combined = f"{window_title} {tab_text}".lower()
+
         distracted_keywords = [
-            "youtube.com", "youtube ", "netflix", "prime video", "twitch.tv",
+            "netflix", "prime video", "twitch.tv",
             "twitter.com", "x.com", "instagram", "tiktok", "facebook.com", "reddit.com",
             "amazon.com", "flipkart", "ebay", "shopping", "game", "movie", "series",
-             "nsfw content",
+            "nsfw content",
         ]
+
         productive_keywords = [
             "github", "stackoverflow", "docs.", "documentation", "google cloud",
             "console", "developer", "code", "cursor", "vs code", "pycharm",
             "chatgpt", "gemini", "claude", "ai.google", "localhost", "terminal",
+            "jupyter", "notebook"
         ]
+
+        # Educational keywords for YouTube
+        educational_keywords = [
+            "tutorial", "course", "lecture", "lesson",
+            "machine learning", "deep learning", "ai",
+            "python", "programming", "coding",
+            "data science", "crash course" ,"how to", "guide", "webinar"
+        ]
+
+        # Special handling for YouTube
+        if "youtube" in combined:
+            if any(k in combined for k in educational_keywords):
+                return True   # Educational YouTube → productive
+            return False      # Entertainment YouTube → distracted
+
+        # Check other distractions
         if any(k in combined for k in distracted_keywords):
             return False
+
+        # Check productive tools
         if any(k in combined for k in productive_keywords):
             return True
+
         return True  # when in doubt, treat as productive
 
     def vision_loop(self):
@@ -248,7 +271,7 @@ class MojoApp:
                 self.root.after(0, lambda: messagebox.showerror("Gemini Error", f"Failed to initialize Gemini client: {e}"))
             return
         # Use current model IDs (gemini-1.5-flash is deprecated on v1beta); try in order
-        GEMINI_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash-latest", "gemini-1.5-flash-001"]
+        GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"]
         model_index = 0
 
         while True:
@@ -309,24 +332,39 @@ class MojoApp:
 
             print("EVALUATING WITH AI...")
             prompt = (
-                "SYSTEM: You are a strict productivity monitor. You MUST base your decision on what you SEE in the attached screenshot.\n\n"
-                "PRIMARY: Look at the IMAGE. The image shows the top of the user's screen (browser URL bar, tab bar, and visible page content).\n"
-                "Your job is to classify whether what is VISUALLY on screen (URL, search query, page content, visible text/links) is productive work or a distraction.\n\n"
+                "SYSTEM: You are a visual productivity monitoring agent. You MUST base your decision on what you SEE in the attached screenshot.\n\n"
+                "PRIMARY TASK:\n"
+                "Look carefully at the IMAGE first. The screenshot shows the top portion of the user's screen (browser tabs, URL bar, and visible page content).\n"
+                "Use the visual content of the screenshot to decide if the user is doing productive work or being distracted.\n\n"
                 f"USER GOAL: {USER_GOAL}\n\n"
-                "Use this context only to support what you see in the image:\n"
+                "Use this additional context only to support what you see visually:\n"
                 f"Window title: {current_title}\n"
-                f"OCR of URL/tab bar (may be noisy): {tab_titles[:220]}\n\n"
-                "PRODUCTIVE = what's on screen is clearly work: code, docs, GitHub, StackOverflow, IDE, terminal, AI tools for work, research, study.\n\n"
-                "DISTRACTED = what's on screen is clearly not work. ALWAYS mark DISTRACTED if you see ANY of the following in the image:\n"
-                "- Inappropriate or adult content, NSFW, or search queries/results that are sexual, pornographic, or not work-related\n"
-                "- Entertainment: YouTube/Netflix/Twitch for videos, social media feeds (Twitter, Instagram, TikTok, Facebook, Reddit for casual browsing)\n"
-                "- Shopping (Amazon, etc.) unless clearly work-related\n"
-                "- Memes, gossip, celebrity news, random time-wasting sites\n"
-                "- Google (or any search) showing results for inappropriate queries, jokes, or off-topic searches — the SEARCH RESULTS and visible page content decide, not the fact that it's a search\n\n"
-                "CRITICAL: If the visible URL bar, search box, or page content shows an inappropriate search term, inappropriate site, or clearly non-work content, you MUST output STATUS: DISTRACTED.\n"
-                "When in doubt between productive vs distracted, prefer DISTRACTED for anything that looks like entertainment, adult content, or off-topic browsing.\n\n"
+                f"OCR text from tab/URL area (may contain noise): {tab_titles[:220]}\n\n"
+                "PRODUCTIVE examples (these support the user's goals):\n"
+                "- Programming tutorials or technical lectures\n"
+                "- Machine learning tutorials or AI research videos\n"
+                "- Coding walkthroughs or software engineering lessons\n"
+                "- GitHub repositories, documentation sites, StackOverflow\n"
+                "- IDEs, terminals, Jupyter notebooks\n"
+                "- AI tools like ChatGPT, Gemini, Claude used for learning or coding\n"
+                "- Educational YouTube videos related to programming, AI, or study\n\n"
+                "DISTRACTED examples (not related to work):\n"
+                "- Music videos or entertainment videos\n"
+                "- Gaming streams or random YouTube entertainment\n"
+                "- Social media browsing (Twitter, Instagram, TikTok, Facebook)\n"
+                "- Shopping websites (Amazon, Flipkart) unless clearly work-related\n"
+                "- Meme sites, gossip pages, celebrity news\n"
+                "- Adult or NSFW content\n\n"
+                "VIDEO RULE:\n"
+                "If the screenshot shows a YouTube video that is clearly a tutorial, lecture, or educational content related to programming, AI, or research, mark PRODUCTIVE.\n"
+                "If the YouTube video is music, entertainment, gaming, or unrelated to work, mark DISTRACTED.\n\n"
+                "DECISION RULE:\n"
+                "Base the decision on the visible content of the screenshot.\n"
+                "When unsure between entertainment vs education, check the video title or visible page text carefully.\n\n"
                 "OUTPUT exactly: 'REASON: <very short reason> | STATUS: <PRODUCTIVE or DISTRACTED>'"
             )
+                
+            
             try:
                 raw_img = Image.open("vision_input.png")
                 model_id = GEMINI_MODELS[model_index]
