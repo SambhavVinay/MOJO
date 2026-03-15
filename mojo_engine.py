@@ -1,4 +1,8 @@
+import os
 import tkinter as tk
+from dotenv import load_dotenv
+
+load_dotenv()  # load .env into os.environ
 import threading
 import mss
 import ollama
@@ -11,12 +15,14 @@ import psutil
 import win32con
 import pytesseract
 from PIL import Image
+import google.genai as genai
+from google.genai import types
 
 from mojo_ui import MojoUI 
 
 # --- CONFIGURATION ---
 pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-USER_GOAL = "Software Development, Python Coding, and AI Research, General Productivity, Note Taking, Time Management, "
+USER_GOAL = "General Productivity, Research, School work, College Work, LLM Usage, AI Usage, Python Coding, and AI Research, General Productivity, Note Taking, Time Management "
 
 WHITELISTED_EXES = ["powershell.exe", "pwsh.exe", "cmd.exe", "code.exe", "cursor.exe", "python.exe", "pycharm64.exe", "SearchHost.exe", "WhatsApp.exe", "obs64.exe", "WindowsTerminal.exe"]
 WHITELISTED_TITLES = ["gemini", "chatgpt", "github", "stackoverflow", "documentation", "localhost", "SearchHost", "visual studio code", "terminal", "powershell"]
@@ -42,6 +48,7 @@ class MojoApp:
 
         self.is_interrogating = False
         self.grace_period_until = 0
+        self.quota_cooldown_until = 0  # skip API calls until this time (429 backoff)
         self.control_panel = None 
 
         print("--- MOJO INITIALIZED ---")
@@ -98,7 +105,32 @@ class MojoApp:
                 tab_text = ""
             return tab_text
 
+    def _fallback_productive_check(self, window_title: str, tab_text: str) -> bool:
+        """When API is unavailable, use simple keyword heuristics. Returns True if productive."""
+        combined = f"{window_title} {tab_text}".lower()
+        distracted_keywords = [
+            "youtube.com", "youtube ", "netflix", "prime video", "twitch.tv",
+            "twitter.com", "x.com", "instagram", "tiktok", "facebook.com", "reddit.com",
+            "amazon.com", "flipkart", "ebay", "shopping", "game", "movie", "series",
+        ]
+        productive_keywords = [
+            "github", "stackoverflow", "docs.", "documentation", "google cloud",
+            "console", "developer", "code", "cursor", "vs code", "pycharm",
+            "chatgpt", "gemini", "claude", "ai.google", "localhost", "terminal",
+        ]
+        if any(k in combined for k in distracted_keywords):
+            return False
+        if any(k in combined for k in productive_keywords):
+            return True
+        return True  # when in doubt, treat as productive
+
     def vision_loop(self):
+        api_key = os.environ.get("GEMINI_API_KEY")
+        client = genai.Client(api_key=api_key)
+        # Use current model IDs (gemini-1.5-flash is deprecated on v1beta); try in order
+        GEMINI_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash-latest", "gemini-1.5-flash-001"]
+        model_index = 0
+
         while True:
             if self.is_interrogating:
                 time.sleep(1)
@@ -113,27 +145,49 @@ class MojoApp:
             current_title = self.get_active_window_title()
             current_exe = self.get_active_app_info()
             current_hwnd = win32gui.GetForegroundWindow()
-            tab_titles = self.get_screen_data()
+            tab_titles = self.get_screen_data() # This saves 'vision_input.png'
 
             low_title = current_title.lower()
             exe_low = current_exe.lower() if current_exe else ""
-            
-            print("-" * 30)
-            print(f"APP: {current_exe} | WINDOW: {current_title}")
 
+            # Check Whitelists
             if exe_low in WHITELISTED_EXES or any(wt in low_title for wt in WHITELISTED_TITLES):
-                print("DECISION: PRODUCTIVE (Whitelisted ✅)")
                 self.update_ui("🔥", "LOCKED IN", "lime", "white")
                 time.sleep(3)
                 continue
 
-            ignored = ["mojo", "tk", "explorer.exe", "task manager", "settings", "search host", "searchhost"]
+            # Check Ignored
+            ignored = ["mojo", "tk", "explorer.exe", "task manager", "settings", "search host"]
             if any(x in low_title for x in ignored) or exe_low in ignored:
-                print("DECISION: IGNORED (System ⚙️)")
                 time.sleep(1)
                 continue
 
-            print("DECISION: EVALUATING WITH AI...")
+            # Print everything we're seeing
+            print("\n" + "=" * 50)
+            print("--- WHAT I'M SEEING ---")
+            print(f"  Active window title: {current_title!r}")
+            print(f"  Process (exe):       {current_exe!r}")
+            print(f"  OCR tab/top text:    {tab_titles[:300]!r}")
+            print("  (Screenshot saved:   vision_input.png)")
+            print("=" * 50)
+
+            # If we're in quota cooldown (429), skip API and use keyword fallback
+            if time.time() < self.quota_cooldown_until:
+                rem = int(self.quota_cooldown_until - time.time())
+                print(f"API in cooldown ({rem}s left) — using keyword fallback")
+                is_productive = self._fallback_productive_check(current_title, tab_titles)
+                if is_productive:
+                    print("DECISION: PRODUCTIVE (fallback)")
+                    self.update_ui("🔥", "LOCKED IN", "lime", "white")
+                else:
+                    print("DECISION: DISTRACTED (fallback)")
+                    if "mojo" not in (current_exe or "").lower():
+                        self.update_ui("🚫", "DISTRACTED", "red", "red")
+                        self.interrogate(current_exe, current_hwnd)
+                time.sleep(5)
+                continue
+
+            print("EVALUATING WITH AI...")
             prompt = (
                 "SYSTEM: You are a strict productivity monitor.\n"
                 "You ONLY judge the SINGLE ACTIVE BROWSER TAB that is currently visible.\n"
@@ -157,21 +211,52 @@ class MojoApp:
                 "4. When in doubt, slightly bias toward PRODUCTIVE for docs, code, or AI tools.\n"
                 "OUTPUT: 'REASON: <very short reason> | STATUS: <PRODUCTIVE/DISTRACTED>'"
             )
-
             try:
-                response = ollama.chat(model='llava', messages=[{'role': 'user', 'content': prompt, 'images': ['vision_input.png']}], options={'temperature': 0})
-                result = response['message']['content'].upper()
-                print(f"AI ANALYSIS: {result.strip()}")
+                raw_img = Image.open("vision_input.png")
+                model_id = GEMINI_MODELS[model_index]
+                response = client.models.generate_content(
+                    model=model_id,
+                    contents=[prompt, raw_img]
+                )
 
-                if "STATUS: PRODUCTIVE" not in result:
-                    print(f"RESULT: DISTRACTED 🚫")
-                    self.update_ui("🚫", "DISTRACTED", "red", "red")
-                    self.interrogate(current_exe, current_hwnd)
+                if response.text:
+                    result = response.text.upper()
+                    print(f"AI raw response: {response.text.strip()}")
+
+                    if "STATUS: PRODUCTIVE" not in result:
+                        print("DECISION: DISTRACTED")
+                        if "mojo" not in (current_exe or "").lower():
+                            self.update_ui("🚫", "DISTRACTED", "red", "red")
+                            self.interrogate(current_exe, current_hwnd)
+                    else:
+                        print("DECISION: PRODUCTIVE")
+                        self.update_ui("🔥", "LOCKED IN", "lime", "white")
                 else:
-                    print("RESULT: PRODUCTIVE 🔥")
-                    self.update_ui("🔥", "LOCKED IN", "lime", "white")
+                    print("DECISION: (none — empty response / Safety Filter?)")
+                    self.update_ui("🔍", "CHECKING", "gray", "white")
+
             except Exception as e:
-                print(f"LLM Error: {e}")
+                err_str = str(e).upper()
+                if "404" in err_str or "NOT_FOUND" in err_str:
+                    model_index = min(model_index + 1, len(GEMINI_MODELS) - 1)
+                    print(f"Gemini model not found, trying {GEMINI_MODELS[model_index]}...")
+                elif "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    self.quota_cooldown_until = time.time() + 60
+                    print("Gemini quota exceeded. Waiting 60s before retrying API.")
+                    print("Using keyword fallback for this check and the next 60s.")
+                    is_productive = self._fallback_productive_check(current_title, tab_titles)
+                    if is_productive:
+                        print("DECISION: PRODUCTIVE (fallback)")
+                        self.update_ui("🔥", "LOCKED IN", "lime", "white")
+                    else:
+                        print("DECISION: DISTRACTED (fallback)")
+                        if "mojo" not in (current_exe or "").lower():
+                            self.update_ui("🚫", "DISTRACTED", "red", "red")
+                            self.interrogate(current_exe, current_hwnd)
+                else:
+                    print(f"Gemini API Error: {e}")
+                    print("DECISION: (skipped — API error)")
+                    self.update_ui("🔍", "CHECKING", "gray", "white")
 
             time.sleep(2)
 

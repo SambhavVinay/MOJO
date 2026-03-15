@@ -1,4 +1,11 @@
+import os
+import sys
+import json
 import tkinter as tk
+from tkinter import messagebox
+from dotenv import load_dotenv
+
+load_dotenv()  # load .env into os.environ
 import threading
 import mss
 import ollama
@@ -11,12 +18,95 @@ import psutil
 import win32con
 import pytesseract
 from PIL import Image
+import google.genai as genai
+from google.genai import types
 
-from mojo_ui import MojoUI 
+from mojo_ui import MojoUI
+
+# --- PORTABLE PATHS ---
+def _get_app_dir():
+    """Directory for config and data; next to exe when frozen, else script dir."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+def _setup_tesseract_path():
+    """Use tesseract in cwd if present, else fallback to Program Files."""
+    cwd = os.getcwd()
+    candidates = [
+        os.path.join(cwd, "tesseract", "tesseract.exe"),
+        os.path.join(cwd, "Tesseract-OCR", "tesseract.exe"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            pytesseract.pytesseract.tesseract_cmd = path
+            return
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+_setup_tesseract_path()
+
+# --- API KEY (config.json) ---
+CONFIG_FILENAME = "config.json"
+
+def _config_path():
+    return os.path.join(_get_app_dir(), CONFIG_FILENAME)
+
+def _load_api_key_from_config():
+    try:
+        path = _config_path()
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("GEMINI_API_KEY") or data.get("gemini_api_key")
+    except Exception:
+        pass
+    return None
+
+def _save_api_key_to_config(api_key: str):
+    try:
+        path = _config_path()
+        data = {}
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                pass
+        data["GEMINI_API_KEY"] = api_key.strip()
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+def _ask_api_key_popup():
+    """Show a simple Tkinter popup to enter Gemini API Key. Returns key or None."""
+    root = tk.Tk()
+    root.title("Mojo — API Key")
+    root.resizable(False, False)
+    root.geometry("400x120")
+    root.eval("tk::PlaceWindow . center")
+    var = tk.StringVar()
+    tk.Label(root, text="Enter your Gemini API Key:", font=("Segoe UI", 10)).pack(pady=(12, 4))
+    entry = tk.Entry(root, textvariable=var, width=50, show="*")
+    entry.pack(pady=4, padx=12)
+    result = [None]
+
+    def ok():
+        result[0] = (var.get() or "").strip() or None
+        root.destroy()
+
+    def cancel():
+        root.destroy()
+
+    tk.Frame(root).pack(pady=4)
+    tk.Button(root, text="OK", command=ok, width=10).pack(side=tk.LEFT, padx=4)
+    tk.Button(root, text="Cancel", command=cancel, width=10).pack(side=tk.LEFT)
+    entry.focus()
+    root.mainloop()
+    return result[0]
 
 # --- CONFIGURATION ---
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-USER_GOAL = "Software Development, Python Coding, and AI Research, General Productivity, Note Taking, Time Management, "
+USER_GOAL = "General Productivity, Research, School work, College Work, LLM Usage, AI Usage, Python Coding, and AI Research, General Productivity, Note Taking, Time Management "
 
 WHITELISTED_EXES = ["powershell.exe", "pwsh.exe", "cmd.exe", "code.exe", "cursor.exe", "python.exe", "pycharm64.exe", "SearchHost.exe", "WhatsApp.exe", "obs64.exe", "WindowsTerminal.exe"]
 WHITELISTED_TITLES = ["gemini", "chatgpt", "github", "stackoverflow", "documentation", "localhost", "SearchHost", "visual studio code", "terminal", "powershell"]
@@ -25,8 +115,11 @@ class MojoApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Mojo")
-        self.root.overrideredirect(True)
+        # Normal window so it appears in taskbar and can be closed with X
+        self.root.overrideredirect(False)
         self.root.attributes("-topmost", True)
+        self.root.resizable(False, False)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.bg_color = '#000001'
         self.root.config(bg=self.bg_color)
@@ -42,7 +135,17 @@ class MojoApp:
 
         self.is_interrogating = False
         self.grace_period_until = 0
-        self.control_panel = None 
+        self.quota_cooldown_until = 0  # skip API calls until this time (429 backoff)
+        self.control_panel = None
+
+        # Resolve Gemini API key: env -> config.json -> popup
+        api_key = os.environ.get("GEMINI_API_KEY") or _load_api_key_from_config()
+        if not (api_key and api_key.strip()):
+            api_key = _ask_api_key_popup()
+            if api_key:
+                _save_api_key_to_config(api_key)
+        if api_key:
+            os.environ["GEMINI_API_KEY"] = api_key.strip()
 
         print("--- MOJO INITIALIZED ---")
         print(f"Goal: {USER_GOAL}\n")
@@ -62,6 +165,15 @@ class MojoApp:
         y = self.root.winfo_y() + event.y - self._offsety
         self.root.geometry(f"+{x}+{y}")
         self.ui.reposition_bubbles()
+
+    def _on_close(self):
+        """Handle taskbar/window close (X button) — quit the app."""
+        try:
+            self.root.quit()
+            self.root.destroy()
+        except Exception:
+            pass
+        os._exit(0)
 
     def refresh_topmost(self):
         self.root.attributes("-topmost", True)
@@ -98,7 +210,47 @@ class MojoApp:
                 tab_text = ""
             return tab_text
 
+    def _fallback_productive_check(self, window_title: str, tab_text: str) -> bool:
+        """When API is unavailable, use simple keyword heuristics. Returns True if productive."""
+        combined = f"{window_title} {tab_text}".lower()
+        distracted_keywords = [
+            "youtube.com", "youtube ", "netflix", "prime video", "twitch.tv",
+            "twitter.com", "x.com", "instagram", "tiktok", "facebook.com", "reddit.com",
+            "amazon.com", "flipkart", "ebay", "shopping", "game", "movie", "series",
+             "nsfw content",
+        ]
+        productive_keywords = [
+            "github", "stackoverflow", "docs.", "documentation", "google cloud",
+            "console", "developer", "code", "cursor", "vs code", "pycharm",
+            "chatgpt", "gemini", "claude", "ai.google", "localhost", "terminal",
+        ]
+        if any(k in combined for k in distracted_keywords):
+            return False
+        if any(k in combined for k in productive_keywords):
+            return True
+        return True  # when in doubt, treat as productive
+
     def vision_loop(self):
+        api_key = os.environ.get("GEMINI_API_KEY")
+        try:
+            client = genai.Client(api_key=api_key)
+        except Exception as e:
+            err_msg = str(e).lower()
+            if "api_key" in err_msg or "invalid" in err_msg or "401" in err_msg or "403" in err_msg:
+                def show_invalid_key():
+                    messagebox.showerror(
+                        "Invalid API Key",
+                        "The Gemini API key appears to be invalid or was rejected.\n\n"
+                        "Edit or delete config.json next to the app and restart to enter a new key."
+                    )
+                self.root.after(0, show_invalid_key)
+            else:
+                self.root.after(0, lambda: messagebox.showerror("Gemini Error", f"Failed to initialize Gemini client: {e}"))
+            return
+        # Use current model IDs (gemini-1.5-flash is deprecated on v1beta); try in order
+        GEMINI_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash-latest", "gemini-1.5-flash-001"]
+        model_index = 0
+
         while True:
             if self.is_interrogating:
                 time.sleep(1)
@@ -113,65 +265,114 @@ class MojoApp:
             current_title = self.get_active_window_title()
             current_exe = self.get_active_app_info()
             current_hwnd = win32gui.GetForegroundWindow()
-            tab_titles = self.get_screen_data()
+            tab_titles = self.get_screen_data() # This saves 'vision_input.png'
 
             low_title = current_title.lower()
             exe_low = current_exe.lower() if current_exe else ""
-            
-            print("-" * 30)
-            print(f"APP: {current_exe} | WINDOW: {current_title}")
 
+            # Check Whitelists
             if exe_low in WHITELISTED_EXES or any(wt in low_title for wt in WHITELISTED_TITLES):
-                print("DECISION: PRODUCTIVE (Whitelisted ✅)")
                 self.update_ui("🔥", "LOCKED IN", "lime", "white")
                 time.sleep(3)
                 continue
 
-            ignored = ["mojo", "tk", "explorer.exe", "task manager", "settings", "search host", "searchhost"]
+            # Check Ignored
+            ignored = ["mojo", "tk", "explorer.exe", "task manager", "settings", "search host"]
             if any(x in low_title for x in ignored) or exe_low in ignored:
-                print("DECISION: IGNORED (System ⚙️)")
                 time.sleep(1)
                 continue
 
-            print("DECISION: EVALUATING WITH AI...")
-            prompt = (
-                "SYSTEM: You are a strict productivity monitor.\n"
-                "You ONLY judge the SINGLE ACTIVE BROWSER TAB that is currently visible.\n"
-                "Ignore all other tabs, bookmarks, sidebars, or background windows.\n\n"
-                f"USER GOAL: {USER_GOAL}\n"
-                f"ACTIVE WINDOW TITLE: {current_title}\n"
-                f"ACTIVE TAB/TOP-BAR TEXT (OCR): {tab_titles[:220]}\n\n"
-                "PRODUCTIVE EXAMPLES (treat as PRODUCTIVE when clearly related):\n"
-                "- IDEs, terminals, code editors, GitHub, documentation, StackOverflow, research papers,\n"
-                "- AI tools (ChatGPT, Gemini, Claude, local LLM frontends) used for coding or research,\n"
-                "- Developer dashboards, monitoring tools, technical blogs and tutorials.\n\n"
-                "DISTRACTED EXAMPLES (treat as DISTRACTED when clearly the main purpose):\n"
-                "- Entertainment: YouTube/Netflix/Prime for movies, shows, music videos,\n"
-                "- Social media: Twitter/X, Instagram, TikTok, Facebook, Reddit for browsing,\n"
-                "- Shopping: Amazon, Flipkart and similar ecommerce browsing not clearly work-related,\n"
-                "- Random news, celebrity gossip, meme sites.\n\n"
-                "RULES:\n"
-                "1. If this is a browser, decide ONLY from the active tab content and URL text.\n"
-                "2. If the tab clearly supports the user goal, call it PRODUCTIVE.\n"
-                "3. If the tab is mainly entertainment, social, shopping or idle browsing, call it DISTRACTED.\n"
-                "4. When in doubt, slightly bias toward PRODUCTIVE for docs, code, or AI tools.\n"
-                "OUTPUT: 'REASON: <very short reason> | STATUS: <PRODUCTIVE/DISTRACTED>'"
-            )
+            # Print everything we're seeing
+            print("\n" + "=" * 50)
+            print("--- WHAT I'M SEEING ---")
+            print(f"  Active window title: {current_title!r}")
+            print(f"  Process (exe):       {current_exe!r}")
+            print(f"  OCR tab/top text:    {tab_titles[:300]!r}")
+            print("  (Screenshot saved:   vision_input.png)")
+            print("=" * 50)
 
-            try:
-                response = ollama.chat(model='llava', messages=[{'role': 'user', 'content': prompt, 'images': ['vision_input.png']}], options={'temperature': 0})
-                result = response['message']['content'].upper()
-                print(f"AI ANALYSIS: {result.strip()}")
-
-                if "STATUS: PRODUCTIVE" not in result:
-                    print(f"RESULT: DISTRACTED 🚫")
-                    self.update_ui("🚫", "DISTRACTED", "red", "red")
-                    self.interrogate(current_exe, current_hwnd)
-                else:
-                    print("RESULT: PRODUCTIVE 🔥")
+            # If we're in quota cooldown (429), skip API and use keyword fallback
+            if time.time() < self.quota_cooldown_until:
+                rem = int(self.quota_cooldown_until - time.time())
+                print(f"API in cooldown ({rem}s left) — using keyword fallback")
+                is_productive = self._fallback_productive_check(current_title, tab_titles)
+                if is_productive:
+                    print("DECISION: PRODUCTIVE (fallback)")
                     self.update_ui("🔥", "LOCKED IN", "lime", "white")
+                else:
+                    print("DECISION: DISTRACTED (fallback)")
+                    if "mojo" not in (current_exe or "").lower():
+                        self.update_ui("🚫", "DISTRACTED", "red", "red")
+                        self.interrogate(current_exe, current_hwnd)
+                time.sleep(5)
+                continue
+
+            print("EVALUATING WITH AI...")
+            prompt = (
+                "SYSTEM: You are a strict productivity monitor. You MUST base your decision on what you SEE in the attached screenshot.\n\n"
+                "PRIMARY: Look at the IMAGE. The image shows the top of the user's screen (browser URL bar, tab bar, and visible page content).\n"
+                "Your job is to classify whether what is VISUALLY on screen (URL, search query, page content, visible text/links) is productive work or a distraction.\n\n"
+                f"USER GOAL: {USER_GOAL}\n\n"
+                "Use this context only to support what you see in the image:\n"
+                f"Window title: {current_title}\n"
+                f"OCR of URL/tab bar (may be noisy): {tab_titles[:220]}\n\n"
+                "PRODUCTIVE = what's on screen is clearly work: code, docs, GitHub, StackOverflow, IDE, terminal, AI tools for work, research, study.\n\n"
+                "DISTRACTED = what's on screen is clearly not work. ALWAYS mark DISTRACTED if you see ANY of the following in the image:\n"
+                "- Inappropriate or adult content, NSFW, or search queries/results that are sexual, pornographic, or not work-related\n"
+                "- Entertainment: YouTube/Netflix/Twitch for videos, social media feeds (Twitter, Instagram, TikTok, Facebook, Reddit for casual browsing)\n"
+                "- Shopping (Amazon, etc.) unless clearly work-related\n"
+                "- Memes, gossip, celebrity news, random time-wasting sites\n"
+                "- Google (or any search) showing results for inappropriate queries, jokes, or off-topic searches — the SEARCH RESULTS and visible page content decide, not the fact that it's a search\n\n"
+                "CRITICAL: If the visible URL bar, search box, or page content shows an inappropriate search term, inappropriate site, or clearly non-work content, you MUST output STATUS: DISTRACTED.\n"
+                "When in doubt between productive vs distracted, prefer DISTRACTED for anything that looks like entertainment, adult content, or off-topic browsing.\n\n"
+                "OUTPUT exactly: 'REASON: <very short reason> | STATUS: <PRODUCTIVE or DISTRACTED>'"
+            )
+            try:
+                raw_img = Image.open("vision_input.png")
+                model_id = GEMINI_MODELS[model_index]
+                response = client.models.generate_content(
+                    model=model_id,
+                    contents=[prompt, raw_img]
+                )
+
+                if response.text:
+                    result = response.text.upper()
+                    print(f"AI raw response: {response.text.strip()}")
+
+                    if "STATUS: PRODUCTIVE" not in result:
+                        print("DECISION: DISTRACTED")
+                        if "mojo" not in (current_exe or "").lower():
+                            self.update_ui("🚫", "DISTRACTED", "red", "red")
+                            self.interrogate(current_exe, current_hwnd)
+                    else:
+                        print("DECISION: PRODUCTIVE")
+                        self.update_ui("🔥", "LOCKED IN", "lime", "white")
+                else:
+                    print("DECISION: (none — empty response / Safety Filter?)")
+                    self.update_ui("🔍", "CHECKING", "gray", "white")
+
             except Exception as e:
-                print(f"LLM Error: {e}")
+                err_str = str(e).upper()
+                if "404" in err_str or "NOT_FOUND" in err_str:
+                    model_index = min(model_index + 1, len(GEMINI_MODELS) - 1)
+                    print(f"Gemini model not found, trying {GEMINI_MODELS[model_index]}...")
+                elif "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    self.quota_cooldown_until = time.time() + 60
+                    print("Gemini quota exceeded. Waiting 60s before retrying API.")
+                    print("Using keyword fallback for this check and the next 60s.")
+                    is_productive = self._fallback_productive_check(current_title, tab_titles)
+                    if is_productive:
+                        print("DECISION: PRODUCTIVE (fallback)")
+                        self.update_ui("🔥", "LOCKED IN", "lime", "white")
+                    else:
+                        print("DECISION: DISTRACTED (fallback)")
+                        if "mojo" not in (current_exe or "").lower():
+                            self.update_ui("🚫", "DISTRACTED", "red", "red")
+                            self.interrogate(current_exe, current_hwnd)
+                else:
+                    print(f"Gemini API Error: {e}")
+                    print("DECISION: (skipped — API error)")
+                    self.update_ui("🔍", "CHECKING", "gray", "white")
 
             time.sleep(2)
 
