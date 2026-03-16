@@ -108,8 +108,8 @@ def _ask_api_key_popup():
 # --- CONFIGURATION ---
 USER_GOAL = "Staying focused and productive. Productivity is anything work-related, learning, personal development, or reasonable breaks for well-being."
 
-WHITELISTED_EXES = ["powershell.exe", "pwsh.exe", "cmd.exe", "code.exe", "cursor.exe", "python.exe", "pycharm64.exe", "searchhost.exe", "searchui.exe", "searchapp.exe", "whatsapp.exe", "obs64.exe", "windowsterminal.exe"]
-WHITELISTED_TITLES = ["gemini", "chatgpt", "github", "stackoverflow", "documentation", "localhost", "searchhost", "search ui", "search app", "visual studio code", "terminal", "powershell", "whatsapp"]
+WHITELISTED_EXES = ["chrome.exe","powershell.exe", "pwsh.exe", "cmd.exe", "code.exe", "cursor.exe", "python.exe", "pycharm64.exe", "searchhost.exe", "searchui.exe", "searchapp.exe", "whatsapp.exe", "obs64.exe", "windowsterminal.exe"]
+WHITELISTED_TITLES = ["google meet","gemini", "chatgpt", "github", "stackoverflow", "documentation", "localhost", "searchhost", "search ui", "search app", "visual studio code", "terminal", "powershell", "whatsapp"]
 
 # Descriptors for common distraction/chat/game applications
 DISTRACTED_EXES = [
