@@ -108,8 +108,18 @@ def _ask_api_key_popup():
 # --- CONFIGURATION ---
 USER_GOAL = "General Productivity, Research, School work, College Work, LLM Usage, AI Usage, Python Coding, and AI Research, General Productivity, Note Taking, Time Management "
 
-WHITELISTED_EXES = ["powershell.exe", "pwsh.exe", "cmd.exe", "code.exe", "cursor.exe", "python.exe", "pycharm64.exe", "SearchHost.exe", "WhatsApp.exe", "obs64.exe", "WindowsTerminal.exe"]
-WHITELISTED_TITLES = ["gemini", "chatgpt", "github", "stackoverflow", "documentation", "localhost", "SearchHost", "visual studio code", "terminal", "powershell"]
+WHITELISTED_EXES = ["powershell.exe", "pwsh.exe", "cmd.exe", "code.exe", "cursor.exe", "python.exe", "pycharm64.exe", "searchhost.exe", "searchui.exe", "searchapp.exe", "whatsapp.exe", "obs64.exe", "windowsterminal.exe"]
+WHITELISTED_TITLES = ["gemini", "chatgpt", "github", "stackoverflow", "documentation", "localhost", "searchhost", "search ui", "search app", "visual studio code", "terminal", "powershell"]
+
+# Descriptors for common distraction/chat/game applications
+DISTRACTED_EXES = [
+    "discord.exe", "steam.exe", "epicgameslauncher.exe", "robloxplayerlauncher.exe",
+    "spotify.exe", "twitch.exe", "leagueclient.exe", "valorant.exe", "battlenet.exe",
+]
+DISTRACTED_TITLES = [
+    "discord", "steam", "epic games", "roblox", "twitch", "spotify", "league of legends",
+    "valorant", "battle.net", "call of duty", "fortnite", "minecraft", "vscode dev", "youtube",
+]
 
 class MojoApp:
     def __init__(self):
@@ -193,31 +203,66 @@ class MojoApp:
         except: return ""
 
     def get_screen_data(self):
+        """Capture the active window and OCR it, focusing on key areas like titles.
+
+        For browsers, prioritize OCR of the top area (URL bar, tab title, video/article title).
+        """
+        try:
+            hwnd = win32gui.GetForegroundWindow()
+            if hwnd and win32gui.IsWindow(hwnd):
+                left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+                if right > left and bottom > top:
+                    with mss.mss() as sct:
+                        monitor = {"left": left, "top": top, "width": right - left, "height": bottom - top}
+                        sct_img = sct.grab(monitor)
+                        img = Image.frombytes("RGB", sct_img.size, sct_img.rgb)
+                        img.save("vision_input.png")
+
+                        # OCR the full window
+                        try:
+                            full_ocr = pytesseract.image_to_string(img).strip()
+                        except Exception:
+                            full_ocr = ""
+
+                        # For browsers, OCR the top 20% more carefully (likely contains title/URL)
+                        height = img.height
+                        top_crop = img.crop((0, 0, img.width, int(height * 0.2)))
+                        try:
+                            title_ocr = pytesseract.image_to_string(top_crop).strip()
+                        except Exception:
+                            title_ocr = ""
+
+                        # Combine: prioritize title area, then full
+                        combined_ocr = f"{title_ocr}\n{full_ocr}".strip()
+                        return combined_ocr
+        except Exception:
+            pass
+
+        # Fallback: full screen capture
         with mss.mss() as sct:
             sct.shot(output="temp_screen.png")
             img = Image.open("temp_screen.png")
-            width, height = img.size
-            
-            # Focused Crop: Focus on the top 500px (Tabs/URL) and center
-            # This prevents AI from seeing background windows.
-            focused_area = img.crop((0, 0, width, 600)) 
-            focused_area.save("vision_input.png")
-
-            tab_area = img.crop((0, 0, width, 80))
+            img.save("vision_input.png")
             try:
-                tab_text = pytesseract.image_to_string(tab_area).strip()
-            except:
-                tab_text = ""
-            return tab_text
+                ocr_text = pytesseract.image_to_string(img).strip()
+            except Exception:
+                ocr_text = ""
+            return ocr_text
 
     def _fallback_productive_check(self, window_title: str, tab_text: str) -> bool:
         """When API is unavailable, use simple keyword heuristics. Returns True if productive."""
         combined = f"{window_title} {tab_text}".lower()
+
+        # Treat core system utilities as productive/neutral (not distractions)
+        if any(x in combined for x in ["search host", "searchhost", "search ui", "searchapp"]):
+            return True
+
         distracted_keywords = [
             "youtube.com", "youtube ", "netflix", "prime video", "twitch.tv",
             "twitter.com", "x.com", "instagram", "tiktok", "facebook.com", "reddit.com",
             "amazon.com", "flipkart", "ebay", "shopping", "game", "movie", "series",
-             "nsfw content",
+            "nsfw content", "discord", "steam", "epic games", "roblox", "spotify",
+            "twitch", "league of legends", "valorant", "battle.net", "minecraft",
         ]
         productive_keywords = [
             "github", "stackoverflow", "docs.", "documentation", "google cloud",
@@ -228,7 +273,7 @@ class MojoApp:
             return False
         if any(k in combined for k in productive_keywords):
             return True
-        return True  # when in doubt, treat as productive
+        return False  # when in doubt, treat as distracted to encourage better focus
 
     def vision_loop(self):
         api_key = os.environ.get("GEMINI_API_KEY")
@@ -265,10 +310,11 @@ class MojoApp:
             current_title = self.get_active_window_title()
             current_exe = self.get_active_app_info()
             current_hwnd = win32gui.GetForegroundWindow()
-            tab_titles = self.get_screen_data() # This saves 'vision_input.png'
+            screen_ocr = self.get_screen_data()  # Saves 'vision_input.png'
 
             low_title = current_title.lower()
             exe_low = current_exe.lower() if current_exe else ""
+            ocr_text = (screen_ocr or "").lower()
 
             # Check Whitelists
             if exe_low in WHITELISTED_EXES or any(wt in low_title for wt in WHITELISTED_TITLES):
@@ -277,9 +323,18 @@ class MojoApp:
                 continue
 
             # Check Ignored
-            ignored = ["mojo", "tk", "explorer.exe", "task manager", "settings", "search host"]
+            ignored = ["mojo", "tk", "explorer.exe", "task manager", "settings", "search host", "search ui", "search app"]
             if any(x in low_title for x in ignored) or exe_low in ignored:
                 time.sleep(1)
+                continue
+
+            # Quick heuristic: known chat/game apps are treated as distractions unless whitelisted
+            if exe_low in DISTRACTED_EXES or any(dt in low_title for dt in DISTRACTED_TITLES) or any(dt in ocr_text for dt in DISTRACTED_TITLES):
+                print("DECISION: DISTRACTED (known app keywords)")
+                if "mojo" not in (current_exe or "").lower():
+                    self.update_ui("🚫", "DISTRACTED", "red", "red")
+                    self.interrogate(current_exe, current_hwnd, ocr_text)
+                time.sleep(3)
                 continue
 
             # Print everything we're seeing
@@ -287,7 +342,7 @@ class MojoApp:
             print("--- WHAT I'M SEEING ---")
             print(f"  Active window title: {current_title!r}")
             print(f"  Process (exe):       {current_exe!r}")
-            print(f"  OCR tab/top text:    {tab_titles[:300]!r}")
+            print(f"  OCR window text:     {ocr_text[:300]!r}")
             print("  (Screenshot saved:   vision_input.png)")
             print("=" * 50)
 
@@ -295,7 +350,7 @@ class MojoApp:
             if time.time() < self.quota_cooldown_until:
                 rem = int(self.quota_cooldown_until - time.time())
                 print(f"API in cooldown ({rem}s left) — using keyword fallback")
-                is_productive = self._fallback_productive_check(current_title, tab_titles)
+                is_productive = self._fallback_productive_check(current_title, ocr_text)
                 if is_productive:
                     print("DECISION: PRODUCTIVE (fallback)")
                     self.update_ui("🔥", "LOCKED IN", "lime", "white")
@@ -315,11 +370,12 @@ class MojoApp:
                 f"USER GOAL: {USER_GOAL}\n\n"
                 "Use this context only to support what you see in the image:\n"
                 f"Window title: {current_title}\n"
-                f"OCR of URL/tab bar (may be noisy): {tab_titles[:220]}\n\n"
+                f"OCR of window content (may be noisy): {ocr_text[:220]}\n\n"
                 "PRODUCTIVE = what's on screen is clearly work: code, docs, GitHub, StackOverflow, IDE, terminal, AI tools for work, research, study.\n\n"
                 "DISTRACTED = what's on screen is clearly not work. ALWAYS mark DISTRACTED if you see ANY of the following in the image:\n"
                 "- Inappropriate or adult content, NSFW, or search queries/results that are sexual, pornographic, or not work-related\n"
                 "- Entertainment: YouTube/Netflix/Twitch for videos, social media feeds (Twitter, Instagram, TikTok, Facebook, Reddit for casual browsing)\n"
+                "- Chat/messaging or gaming apps and platforms (Discord, Steam, Epic Games, Roblox, Valorant, League, etc.)\n"
                 "- Shopping (Amazon, etc.) unless clearly work-related\n"
                 "- Memes, gossip, celebrity news, random time-wasting sites\n"
                 "- Google (or any search) showing results for inappropriate queries, jokes, or off-topic searches — the SEARCH RESULTS and visible page content decide, not the fact that it's a search\n\n"
@@ -343,7 +399,7 @@ class MojoApp:
                         print("DECISION: DISTRACTED")
                         if "mojo" not in (current_exe or "").lower():
                             self.update_ui("🚫", "DISTRACTED", "red", "red")
-                            self.interrogate(current_exe, current_hwnd)
+                            self.interrogate(current_exe, current_hwnd, ocr_text)
                     else:
                         print("DECISION: PRODUCTIVE")
                         self.update_ui("🔥", "LOCKED IN", "lime", "white")
@@ -360,7 +416,7 @@ class MojoApp:
                     self.quota_cooldown_until = time.time() + 60
                     print("Gemini quota exceeded. Waiting 60s before retrying API.")
                     print("Using keyword fallback for this check and the next 60s.")
-                    is_productive = self._fallback_productive_check(current_title, tab_titles)
+                    is_productive = self._fallback_productive_check(current_title, ocr_text)
                     if is_productive:
                         print("DECISION: PRODUCTIVE (fallback)")
                         self.update_ui("🔥", "LOCKED IN", "lime", "white")
@@ -368,7 +424,7 @@ class MojoApp:
                         print("DECISION: DISTRACTED (fallback)")
                         if "mojo" not in (current_exe or "").lower():
                             self.update_ui("🚫", "DISTRACTED", "red", "red")
-                            self.interrogate(current_exe, current_hwnd)
+                            self.interrogate(current_exe, current_hwnd, ocr_text)
                 else:
                     print(f"Gemini API Error: {e}")
                     print("DECISION: (skipped — API error)")
@@ -395,12 +451,12 @@ class MojoApp:
         except Exception as e:
             print(f"Close failed: {e}")
 
-    def interrogate(self, target_exe, target_hwnd):
+    def interrogate(self, target_exe, target_hwnd, ocr_text=""):
         if self.is_interrogating: return
         self.is_interrogating = True
-        self.root.after(100, lambda: self._show_interrogate_dialog(target_exe, target_hwnd))
+        self.root.after(100, lambda: self._show_interrogate_dialog(target_exe, target_hwnd, ocr_text))
 
-    def _show_interrogate_dialog(self, target_exe, target_hwnd):
+    def _show_interrogate_dialog(self, target_exe, target_hwnd, ocr_text=""):
         def cleanup():
             # Close MojoUI chat window, if any
             if hasattr(self.ui, 'close_interrogation_dialog'):
@@ -412,16 +468,17 @@ class MojoApp:
             self.update_ui("🔥", "LOCKED IN", "lime", "white")
             print("CLEANUP: All interrogation windows closed.")
 
-        def give_grace():
-            print("AGENT DECISION: GRANT ACCESS (1 minute)")
-            self.grace_period_until = time.time() + 60
+        def give_grace(duration_min: int = 1):
+            duration_min = max(1, min(duration_min, 20))
+            print(f"AGENT DECISION: GRANT ACCESS ({duration_min} minute(s))")
+            self.grace_period_until = time.time() + (duration_min * 60)
             cleanup()
 
         try:
             self.ui.show_interrogation_dialog(
-                target_exe, target_hwnd,
-                # LLM inside MojoUI decides: GRANT_ACCESS vs DENY_ACCESS.
-                on_valid_reason=lambda r: give_grace(),
+                target_exe, target_hwnd, ocr_text,
+                # LLM inside MojoUI decides: GRANT_ACCESS vs DENY_ACCESS and how long.
+                on_valid_reason=lambda duration: give_grace(duration if isinstance(duration, int) else 1),
                 on_invalid=lambda exe, hwnd: (
                     print(f"AGENT DECISION: DENY ACCESS, closing {exe or target_exe}"),
                     self.force_close_distractions(exe or target_exe, hwnd or target_hwnd),

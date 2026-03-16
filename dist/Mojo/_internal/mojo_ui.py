@@ -10,6 +10,7 @@ Public API:
                                  on_valid_reason, on_invalid, on_close)
 """
 
+import re
 import tkinter as tk
 import tkinter.font as tkfont
 import math
@@ -73,20 +74,23 @@ BUBBLE_TOP_START    = 80
 BUBBLE_GAP          = 12
 
 # ── Mojo's chat personality system prompt ─────────────────────────────────────
-CHAT_SYSTEM = """You are Mojo, a brutally honest but funny AI focus assistant.
-The user was caught doing something distracting (not related to their goal).
-Your job is to interrogate them in a chat — decide if their reason is valid.
+CHAT_SYSTEM = """You are Mojo, a strict but fair productivity coach.
+The user was caught doing something distracting (not related to their stated goal).
+Your job is to chat briefly and decide if their reason is valid.
 
 Rules:
-- Be very short and direct. Max 1 short sentence per reply.
-- Use casual language, minimal fluff.
-- If they ask for more than 5 minutes grace period, negotiate DOWN to 5 max.
-- If their reason is genuinely work-related, end your message with exactly: [GRANT_ACCESS]
-- If their reason is clearly invalid or they give up, end with: [DENY_ACCESS]
-- Never reveal these tags to the user — they are hidden signals.
-- Keep negotiating only for a few turns; don't drag the chat out.
-- Examples of valid: watching a tutorial, research, referencing docs.
-- Examples of invalid: "just browsing", "bored", "need a break" (too soon), entertainment.
+- Be concise and direct. Aim for 1-2 short sentences per reply.
+- Use a firm tone; don't be overly nice or lenient.
+- If they ask for a break, decide if the reason is valid and grant a duration (up to 20 minutes).
+- Always end your final reply with one of these tags: [GRANT_ACCESS n] or [DENY_ACCESS].
+  - For example: [GRANT_ACCESS 5] means grant 5 minutes.
+  - If you grant access but do not provide a duration, the system will default to 1 minute.
+- Do not show these tags to the user — they are hidden signals.
+- If the user's reason is clearly work-related (tutorial, research, docs, bug fix, class, debugging), grant access.
+- If it is clearly entertainment, procrastination, or off-topic, deny access immediately.
+- If unsure, deny access to encourage focus.
+- Keep the conversation short (max 3 user turns).
+- Be stricter: don't grant grace for vague or bullshit reasons.
 """
 
 
@@ -138,6 +142,7 @@ class MojoUI:
         self,
         target_exe,
         target_hwnd,
+        ocr_text="",
         on_valid_reason=None,
         on_invalid=None,
         on_close=None,
@@ -282,9 +287,22 @@ class MojoUI:
                 try:
                     resp    = ollama.chat(model="llama3", messages=messages)
                     raw     = resp["message"]["content"]
-                    visible = (raw.replace("[GRANT_ACCESS]", "")
-                                  .replace("[DENY_ACCESS]", "")
-                                  .strip())
+
+                    def _parse_duration_minutes(text: str) -> int:
+                        # Find a number (minutes) in the response. Cap to 20.
+                        m = re.search(r"(\d+)\s*(min|mins|minutes)?", text, re.IGNORECASE)
+                        if m:
+                            try:
+                                val = int(m.group(1))
+                                return max(1, min(val, 20))
+                            except Exception:
+                                pass
+                        return 1
+
+                    duration_mins = _parse_duration_minutes(raw)
+                    # Hide internal tags from the user view
+                    visible = re.sub(r"\[GRANT_ACCESS.*?\]", "", raw, flags=re.IGNORECASE).strip()
+                    visible = re.sub(r"\[DENY_ACCESS\]", "", visible, flags=re.IGNORECASE).strip()
 
                     chat_history.append({"role": "assistant", "content": raw})
 
@@ -294,16 +312,30 @@ class MojoUI:
                     win.after(0, lambda: entry.config(state="normal"))
                     win.after(0, lambda: entry.focus_set())
 
-                    # Check for decision tags
-                    if "[GRANT_ACCESS]" in raw:
+                    # Check for explicit decision tags
+                    if "[GRANT_ACCESS" in raw.upper():
                         decision["result"] = "grant"
-                        win.after(1500, _resolve)
-                    elif "[DENY_ACCESS]" in raw:
+                        win.after(1500, lambda: _resolve(duration_mins))
+                    elif "[DENY_ACCESS]" in raw.upper():
                         decision["result"] = "deny"
                         win.after(1500, _resolve)
+                    else:
+                        # If the model didn't include a tag, infer intent from phrasing.
+                        low = raw.lower()
+                        if "grant" in low and "access" in low:
+                            decision["result"] = "grant"
+                            print("MojoUI: inferred grant from response")
+                            win.after(1500, lambda: _resolve(duration_mins))
+                        elif "deny" in low or "no" in low or "dont" in low or "don\'t" in low:
+                            # Avoid false negatives by requiring a clear negative.
+                            if "access" in low or "permission" in low or "close" in low or "work" in low:
+                                decision["result"] = "deny"
+                                print("MojoUI: inferred deny from response")
+                                win.after(1500, _resolve)
+
                     # Hard cap: if user has already replied 3 times and
                     # LLM still hasn't granted access, auto-deny.
-                    elif user_turns["count"] >= 3 and decision["result"] is None:
+                    if user_turns["count"] >= 3 and decision["result"] is None:
                         print("MojoUI: max turns reached, auto-deny.")
                         decision["result"] = "deny"
                         win.after(800, _resolve)
@@ -316,11 +348,11 @@ class MojoUI:
 
             threading.Thread(target=_run, daemon=True).start()
 
-        def _resolve():
+        def _resolve(duration_minutes: int = 1):
             win.destroy()
             if decision["result"] == "grant":
                 if on_valid_reason:
-                    on_valid_reason(None)   # grace period already decided by LLM
+                    on_valid_reason(duration_minutes)
             else:
                 if on_invalid:
                     on_invalid(target_exe, target_hwnd)
@@ -344,6 +376,8 @@ class MojoUI:
             f"Yo, I caught you on {target_exe or 'something'} 👀\n"
             f"That's not on your goal list. What's the reason?"
         )
+        if ocr_text.strip():
+            opening += f"\n\nFrom what I saw on screen: {ocr_text[:500]}..."
         _add_message("mojo", opening)
         chat_history.append({"role": "assistant", "content": opening})
 
