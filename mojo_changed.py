@@ -106,10 +106,10 @@ def _ask_api_key_popup():
     return result[0]
 
 # --- CONFIGURATION ---
-USER_GOAL = "General Productivity, Research, School work, College Work, LLM Usage, AI Usage, Python Coding, and AI Research, General Productivity, Note Taking, Time Management "
+USER_GOAL = "Staying focused and productive. Productivity is anything work-related, learning, personal development, or reasonable breaks for well-being."
 
 WHITELISTED_EXES = ["powershell.exe", "pwsh.exe", "cmd.exe", "code.exe", "cursor.exe", "python.exe", "pycharm64.exe", "searchhost.exe", "searchui.exe", "searchapp.exe", "whatsapp.exe", "obs64.exe", "windowsterminal.exe"]
-WHITELISTED_TITLES = ["gemini", "chatgpt", "github", "stackoverflow", "documentation", "localhost", "searchhost", "search ui", "search app", "visual studio code", "terminal", "powershell"]
+WHITELISTED_TITLES = ["gemini", "chatgpt", "github", "stackoverflow", "documentation", "localhost", "searchhost", "search ui", "search app", "visual studio code", "terminal", "powershell", "whatsapp"]
 
 # Descriptors for common distraction/chat/game applications
 DISTRACTED_EXES = [
@@ -141,12 +141,12 @@ class MojoApp:
         self.root.bind('<Button-1>', self.start_drag)
         self.root.bind('<B1-Motion>', self.on_drag)
 
-        self.ui = MojoUI(self.root, self.bg_color)
-
         self.is_interrogating = False
         self.grace_period_until = 0
         self.quota_cooldown_until = 0  # skip API calls until this time (429 backoff)
         self.control_panel = None
+
+        self.ui = MojoUI(self.root, self.bg_color, app=self)
 
         # Resolve Gemini API key: env -> config.json -> popup
         api_key = os.environ.get("GEMINI_API_KEY") or _load_api_key_from_config()
@@ -364,23 +364,21 @@ class MojoApp:
 
             print("EVALUATING WITH AI...")
             prompt = (
-                "SYSTEM: You are a strict productivity monitor. You MUST base your decision on what you SEE in the attached screenshot.\n\n"
+                "SYSTEM: You are a fair productivity monitor. Judge based on what you SEE in the screenshot, not on predefined categories.\n\n"
                 "PRIMARY: Look at the IMAGE. The image shows the top of the user's screen (browser URL bar, tab bar, and visible page content).\n"
-                "Your job is to classify whether what is VISUALLY on screen (URL, search query, page content, visible text/links) is productive work or a distraction.\n\n"
-                f"USER GOAL: {USER_GOAL}\n\n"
-                "Use this context only to support what you see in the image:\n"
+                "Your job is to classify whether what is VISUALLY on screen is productive or a distraction.\n\n"
+                "Context (use only to support visual analysis):\n"
                 f"Window title: {current_title}\n"
                 f"OCR of window content (may be noisy): {ocr_text[:220]}\n\n"
-                "PRODUCTIVE = what's on screen is clearly work: code, docs, GitHub, StackOverflow, IDE, terminal, AI tools for work, research, study.\n\n"
-                "DISTRACTED = what's on screen is clearly not work. ALWAYS mark DISTRACTED if you see ANY of the following in the image:\n"
-                "- Inappropriate or adult content, NSFW, or search queries/results that are sexual, pornographic, or not work-related\n"
-                "- Entertainment: YouTube/Netflix/Twitch for videos, social media feeds (Twitter, Instagram, TikTok, Facebook, Reddit for casual browsing)\n"
-                "- Chat/messaging or gaming apps and platforms (Discord, Steam, Epic Games, Roblox, Valorant, League, etc.)\n"
-                "- Shopping (Amazon, etc.) unless clearly work-related\n"
-                "- Memes, gossip, celebrity news, random time-wasting sites\n"
-                "- Google (or any search) showing results for inappropriate queries, jokes, or off-topic searches — the SEARCH RESULTS and visible page content decide, not the fact that it's a search\n\n"
-                "CRITICAL: If the visible URL bar, search box, or page content shows an inappropriate search term, inappropriate site, or clearly non-work content, you MUST output STATUS: DISTRACTED.\n"
-                "When in doubt between productive vs distracted, prefer DISTRACTED for anything that looks like entertainment, adult content, or off-topic browsing.\n\n"
+                "PRODUCTIVITY includes: work, coding, research, learning, documentation, problem-solving, work communication, skill development, and reasonable breaks.\n\n"
+                "DISTRACTED = clearly not work and not reasonable. Mark DISTRACTED only for:\n"
+                "- Explicit adult or NSFW content\n"
+                "- Pure entertainment: YouTube/Netflix/Twitch videos, casual social media scrolling\n"
+                "- Gaming for leisure\n"
+                "- Shopping websites (unless clearly work-related)\n"
+                "- Memes, gossip, celebrity content with no work purpose\n\n"
+                "BE GENEROUS: WhatsApp, Discord, social media, emails - may be productive if used for work communication or quick mental breaks. Evaluate actual usage, not just the app name.\n"
+                "Reasonable breaks ARE productive - humans need rest.\n\n"
                 "OUTPUT exactly: 'REASON: <very short reason> | STATUS: <PRODUCTIVE or DISTRACTED>'"
             )
             try:
@@ -436,20 +434,105 @@ class MojoApp:
         self.ui.update_state(text)
 
     def force_close_distractions(self, exe_name, target_hwnd):
-        try:
-            if not target_hwnd or not win32gui.IsWindow(target_hwnd): return
-            print(f"FORCING CLOSE: {exe_name}")
-            browsers = ["chrome.exe", "msedge.exe", "brave.exe", "firefox.exe"]
-            if exe_name and exe_name.lower() in browsers:
-                win32gui.ShowWindow(target_hwnd, win32con.SW_RESTORE)
-                win32gui.SetForegroundWindow(target_hwnd)
-                time.sleep(0.1)
-                pyautogui.hotkey("ctrl", "w")
-            else:
-                pid = win32process.GetWindowThreadProcessId(target_hwnd)[1]
-                subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-        except Exception as e:
-            print(f"Close failed: {e}")
+        """Force close a distraction window or tab - aggressive and immediate."""
+        print(f"\n>>> FORCE CLOSE: exe={exe_name}, hwnd={target_hwnd}")
+        
+        def _close_now():
+            """Execute the close immediately in a background thread."""
+            try:
+                hwnd_to_close = None
+                
+                # Try provided hwnd first
+                if target_hwnd and win32gui.IsWindow(target_hwnd):
+                    hwnd_to_close = target_hwnd
+                    print(f"  Using provided hwnd: {target_hwnd}")
+                
+                # If invalid, find by process name
+                if not hwnd_to_close and exe_name:
+                    print(f"  Searching for: {exe_name}")
+                    proc_name = exe_name.lower().replace('.exe', '')
+                    try:
+                        for proc in psutil.process_iter(['pid', 'name']):
+                            if proc.name().lower().replace('.exe', '') == proc_name:
+                                pid = proc.pid
+                                # Find window for this PID
+                                windows = []
+                                def cb(hwnd, _):
+                                    try:
+                                        _, wpid = win32process.GetWindowThreadProcessId(hwnd)
+                                        if wpid == pid:
+                                            windows.append(hwnd)
+                                    except:
+                                        pass
+                                    return True
+                                win32gui.EnumWindows(cb, 0)
+                                if windows:
+                                    hwnd_to_close = windows[0]
+                                    print(f"  Found hwnd: {hwnd_to_close}")
+                                    break
+                    except Exception as e:
+                        print(f"  Process search error: {e}")
+                
+                if not hwnd_to_close:
+                    print(f"  ERROR: No window found")
+                    return
+                
+                # CLOSE ATTEMPT 1: For browsers, Ctrl+W to close tab (ONLY ONCE!)
+                browsers = ["chrome.exe", "msedge.exe", "brave.exe", "firefox.exe", "opera.exe"]
+                if exe_name and exe_name.lower() in browsers:
+                    print(f"  [Browser] Attempting Ctrl+W (single press)...")
+                    try:
+                        if win32gui.IsWindow(hwnd_to_close):
+                            win32gui.SetForegroundWindow(hwnd_to_close)
+                            time.sleep(0.15)
+                            win32gui.ShowWindow(hwnd_to_close, win32con.SW_RESTORE)
+                            time.sleep(0.2)
+                            # SEND CTRL+W ONLY ONCE - CLOSES ONE TAB
+                            pyautogui.hotkey("ctrl", "w")
+                            time.sleep(0.8)
+                            print(f"  [Browser] ✓ Ctrl+W sent (tab closed)")
+                            return  # Success - don't try other methods
+                    except Exception as e:
+                        print(f"  [Browser] Ctrl+W failed: {e}")
+                
+                # CLOSE ATTEMPT 2: WM_CLOSE (graceful close)
+                if win32gui.IsWindow(hwnd_to_close):
+                    print(f"  [WM_CLOSE] Sending graceful close...")
+                    try:
+                        win32gui.SendMessage(hwnd_to_close, win32con.WM_CLOSE, 0, 0)
+                        time.sleep(0.8)
+                        if not win32gui.IsWindow(hwnd_to_close):
+                            print(f"  [WM_CLOSE] ✓ Window closed")
+                            return
+                    except Exception as e:
+                        print(f"  [WM_CLOSE] failed: {e}")
+                
+                # CLOSE ATTEMPT 3: taskkill (force kill)
+                if hwnd_to_close and win32gui.IsWindow(hwnd_to_close):
+                    print(f"  [TASKKILL] Force killing process...")
+                    try:
+                        _, pid = win32process.GetWindowThreadProcessId(hwnd_to_close)
+                        result = subprocess.run(
+                            ["taskkill.exe", "/F", "/PID", str(pid)],
+                            capture_output=True,
+                            timeout=3
+                        )
+                        if result.returncode == 0:
+                            print(f"  [TASKKILL] ✓ PID {pid} killed")
+                            return
+                        else:
+                            print(f"  [TASKKILL] code {result.returncode}")
+                    except Exception as e:
+                        print(f"  [TASKKILL] error: {e}")
+                
+                print(f">>> FORCE CLOSE FAILED")
+            except Exception as e:
+                print(f">>> CLOSE ERROR: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        # Execute immediately in background thread (not waiting for root event loop)
+        threading.Thread(target=_close_now, daemon=True).start()
 
     def interrogate(self, target_exe, target_hwnd, ocr_text=""):
         if self.is_interrogating: return
@@ -469,9 +552,15 @@ class MojoApp:
             print("CLEANUP: All interrogation windows closed.")
 
         def give_grace(duration_min: int = 1):
-            duration_min = max(1, min(duration_min, 20))
+            duration_min = max(1, duration_min)  # Allow any duration >= 1 minute
             print(f"AGENT DECISION: GRANT ACCESS ({duration_min} minute(s))")
             self.grace_period_until = time.time() + (duration_min * 60)
+            cleanup()
+
+        def handle_deny(exe, hwnd):
+            """Handle when agent denies access - force close the distraction."""
+            print(f"[handle_deny] CLOSING {exe or target_exe}")
+            self.force_close_distractions(exe or target_exe, hwnd or target_hwnd)
             cleanup()
 
         try:
@@ -479,11 +568,7 @@ class MojoApp:
                 target_exe, target_hwnd, ocr_text,
                 # LLM inside MojoUI decides: GRANT_ACCESS vs DENY_ACCESS and how long.
                 on_valid_reason=lambda duration: give_grace(duration if isinstance(duration, int) else 1),
-                on_invalid=lambda exe, hwnd: (
-                    print(f"AGENT DECISION: DENY ACCESS, closing {exe or target_exe}"),
-                    self.force_close_distractions(exe or target_exe, hwnd or target_hwnd),
-                    cleanup()
-                ),
+                on_invalid=handle_deny,
                 on_close=cleanup
             )
         except Exception as e:

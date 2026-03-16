@@ -74,23 +74,29 @@ BUBBLE_TOP_START    = 80
 BUBBLE_GAP          = 12
 
 # ── Mojo's chat personality system prompt ─────────────────────────────────────
-CHAT_SYSTEM = """You are Mojo, a strict but fair productivity coach.
-The user was caught doing something distracting (not related to their stated goal).
-Your job is to chat briefly and decide if their reason is valid.
+CHAT_SYSTEM = """You are Mojo — a chill but honest productivity buddy. The user just got caught on something distracting.
 
-Rules:
-- Be concise and direct. Aim for 1-2 short sentences per reply.
-- Use a firm tone; don't be overly nice or lenient.
-- If they ask for a break, decide if the reason is valid and grant a duration (up to 20 minutes).
-- Always end your final reply with one of these tags: [GRANT_ACCESS n] or [DENY_ACCESS].
-  - For example: [GRANT_ACCESS 5] means grant 5 minutes.
-  - If you grant access but do not provide a duration, the system will default to 1 minute.
-- Do not show these tags to the user — they are hidden signals.
-- If the user's reason is clearly work-related (tutorial, research, docs, bug fix, class, debugging), grant access.
-- If it is clearly entertainment, procrastination, or off-topic, deny access immediately.
-- If unsure, deny access to encourage focus.
-- Keep the conversation short (max 3 user turns).
-- Be stricter: don't grant grace for vague or bullshit reasons.
+Your job: have a short, natural conversation to figure out if they deserve a break or not. Don't be robotic, don't lecture.
+
+⚠️ HARD RULES (always followed):
+- Every single response MUST end with ONE tag: [CLOSE_NOW] or [GRANT_ACCESS n] or [DENY_ACCESS]. No exceptions.
+- [GRANT_ACCESS n] = break approved, app stays open for n minutes. ONLY after a genuinely valid reason AND duration given.
+- [DENY_ACCESS] = your current leaning, used as a placeholder while the conversation is still going too.
+- [CLOSE_NOW] = immediate close. Only when user explicitly says close it / sorry / my bad.
+
+VALID reasons (earn a break): genuinely tired after real work, bathroom, water/food, urgent message, earned rest after grinding.
+INVALID (close immediately, no second chance): "just listening to music", "just watching videos", "just chilling", bored, idk, vague, any bare entertainment with no context.
+
+How to handle:
+1. Sorry / close it / my bad → brief reply, [CLOSE_NOW].
+2. No reason yet → ask what’s up. [DENY_ACCESS] as placeholder.
+3. VALID reason → ask "how long?", [DENY_ACCESS] while waiting.
+4. Duration given after valid reason → [GRANT_ACCESS n].
+5. INVALID reason (bare music/video/chill excuse) → short callout, close. [DENY_ACCESS].
+6. Funny / evasive → brief laugh, redirect, close. [DENY_ACCESS].
+
+Tone: like texting a friend who genuinely wants you to focus. Short (max 20 words), real, never preachy.
+Always end with exactly one of: [CLOSE_NOW] | [GRANT_ACCESS n] | [DENY_ACCESS]
 """
 
 
@@ -98,9 +104,13 @@ class MojoUI:
     ORB_SIZE   = 80
     ORB_RADIUS = 22
 
-    def __init__(self, root: tk.Tk, bg_color: str = "#000001"):
+    def __init__(self, root: tk.Tk, bg_color: str = "#000001", app=None):
         self.root     = root
         self.bg_color = bg_color
+        self.app      = app  # Reference to MojoApp for accessing grace_period_until
+        self.timer_window     = None   # Separate popup window for grace period timer
+        self._timer_total     = 0.0    # Total duration of current grace period
+        self._timer_detached  = False  # True once user drags the timer away from orb
 
         self.root.geometry(f"{self.ORB_SIZE}x{self.ORB_SIZE}+1400+750")
 
@@ -157,29 +167,40 @@ class MojoUI:
         win.title("Mojo")
         win.overrideredirect(True)
         win.attributes("-topmost", True)
+        win.attributes("-alpha", 0.9)
         win.configure(bg="#1c1c1e")
 
-        # Outer border
-        outer = tk.Frame(win, bg="#2a2a2e", padx=1, pady=1)
-        outer.pack(fill="both", expand=True)
+        # Canvas for rounded background
+        canvas = tk.Canvas(win, bg="#1c1c1e", highlightthickness=0, width=550, height=700)
+        canvas.pack(fill="both", expand=True)
 
-        inner = tk.Frame(outer, bg="#1c1c1e")
-        inner.pack(fill="both", expand=True)
+        def draw_rounded_rect(canvas, x1, y1, x2, y2, r, fill, outline=""):
+            canvas.create_arc(x1, y1, x1+2*r, y1+2*r, start=90, extent=90, fill=fill, outline=outline)
+            canvas.create_arc(x2-2*r, y1, x2, y1+2*r, start=0, extent=90, fill=fill, outline=outline)
+            canvas.create_arc(x1, y2-2*r, x1+2*r, y2, start=180, extent=90, fill=fill, outline=outline)
+            canvas.create_arc(x2-2*r, y2-2*r, x2, y2, start=270, extent=90, fill=fill, outline=outline)
+            canvas.create_rectangle(x1+r, y1, x2-r, y2, fill=fill, outline=outline)
+            canvas.create_rectangle(x1, y1+r, x2, y2-r, fill=fill, outline=outline)
+
+        draw_rounded_rect(canvas, 0, 0, 550, 700, 25, "#1c1c1e")
 
         # Coloured top bar
-        tk.Frame(inner, bg=accent, height=4).pack(fill="x")
+        top_bar = tk.Frame(win, bg=accent, height=4)
+        canvas.create_window(275, 2, window=top_bar)
+        top_bar.pack_propagate(False)
+        top_bar.configure(width=550)
 
         # ── Header ────────────────────────────────────────────────────────────
-        header = tk.Frame(inner, bg="#1c1c1e", padx=14, pady=10)
-        header.pack(fill="x")
+        header_frame = tk.Frame(win, bg="#1c1c1e", padx=14, pady=10)
+        canvas.create_window(275, 50, window=header_frame)
 
-        avatar = tk.Frame(header, bg="#1c1c1e", width=34, height=34)
+        avatar = tk.Frame(header_frame, bg="#1c1c1e", width=34, height=34)
         avatar.pack(side="left", padx=(0, 10))
         avatar.pack_propagate(False)
         tk.Label(avatar, text="🤖", font=("Segoe UI", 16),
                  bg="#1c1c1e").place(relx=0.5, rely=0.5, anchor="center")
 
-        title_col = tk.Frame(header, bg="#1c1c1e")
+        title_col = tk.Frame(header_frame, bg="#1c1c1e")
         title_col.pack(side="left")
         tk.Label(title_col, text="Mojo",
                  font=("Segoe UI", 12, "bold"), fg="#f4f4f5",
@@ -188,23 +209,28 @@ class MojoUI:
                  font=("Segoe UI", 9), fg="#52525b",
                  bg="#1c1c1e").pack(anchor="w")
 
-        tk.Frame(inner, bg="#2a2a2e", height=1).pack(fill="x")
+        # Separator
+        sep_frame = tk.Frame(win, bg="#2a2a2e", height=1)
+        canvas.create_window(275, 90, window=sep_frame)
+        sep_frame.pack_propagate(False)
+        sep_frame.configure(width=500)
 
         # ── Chat area (scrollable) ─────────────────────────────────────────────
-        chat_frame = tk.Frame(inner, bg="#1c1c1e")
-        chat_frame.pack(fill="both", expand=True, padx=0, pady=0)
+        # Chat frame on canvas
+        chat_container = tk.Frame(win, bg="#1c1c1e")
+        canvas.create_window(275, 310, window=chat_container)
 
-        scrollbar = tk.Scrollbar(chat_frame, bg="#1c1c1e", troughcolor="#1c1c1e",
+        scrollbar = tk.Scrollbar(chat_container, bg="#1c1c1e", troughcolor="#1c1c1e",
                                  highlightthickness=0, bd=0)
         scrollbar.pack(side="right", fill="y")
 
-        chat_canvas = tk.Canvas(chat_frame, bg="#1c1c1e", width=340, height=240,
+        chat_canvas = tk.Canvas(chat_container, bg="#1c1c1e", width=480, height=350,
                                 highlightthickness=0, yscrollcommand=scrollbar.set)
         chat_canvas.pack(side="left", fill="both", expand=True)
         scrollbar.config(command=chat_canvas.yview)
 
         msg_frame = tk.Frame(chat_canvas, bg="#1c1c1e")
-        chat_canvas.create_window((0, 0), window=msg_frame, anchor="nw", width=340)
+        chat_canvas.create_window((0, 0), window=msg_frame, anchor="nw", width=480)
 
         def _on_frame_configure(e):
             chat_canvas.configure(scrollregion=chat_canvas.bbox("all"))
@@ -214,21 +240,28 @@ class MojoUI:
 
         # ── Typing indicator ──────────────────────────────────────────────────
         typing_var = tk.StringVar(value="")
-        typing_lbl = tk.Label(inner, textvariable=typing_var,
+        typing_frame = tk.Frame(win, bg="#1c1c1e", padx=14)
+        canvas.create_window(275, 555, window=typing_frame)
+        typing_lbl = tk.Label(typing_frame, textvariable=typing_var,
                               font=("Segoe UI", 9), fg="#52525b",
-                              bg="#1c1c1e", anchor="w", padx=14)
+                              bg="#1c1c1e", anchor="w")
         typing_lbl.pack(fill="x")
 
         # ── Input row ─────────────────────────────────────────────────────────
-        tk.Frame(inner, bg="#2a2a2e", height=1).pack(fill="x")
+        # Input separator
+        input_sep_frame = tk.Frame(win, bg="#2a2a2e", height=1)
+        canvas.create_window(275, 575, window=input_sep_frame)
+        input_sep_frame.pack_propagate(False)
+        input_sep_frame.configure(width=500)
 
-        input_row = tk.Frame(inner, bg="#1c1c1e", padx=12, pady=10)
-        input_row.pack(fill="x")
+        input_frame = tk.Frame(win, bg="#1c1c1e", padx=12, pady=10)
+        canvas.create_window(275, 625, window=input_frame)
 
-        entry_wrap = tk.Frame(input_row, bg="#27272a",
+        entry_wrap = tk.Frame(input_frame, bg="#27272a",
                               highlightthickness=1,
                               highlightbackground="#3f3f46",
-                              highlightcolor=accent)
+                              highlightcolor=accent,
+                              relief="ridge", bd=2)
         entry_wrap.pack(side="left", fill="x", expand=True, padx=(0, 8))
 
         entry = tk.Entry(entry_wrap, font=("Segoe UI", 11),
@@ -238,7 +271,7 @@ class MojoUI:
         entry.pack(fill="x")
         entry.focus_set()
 
-        send_btn = tk.Button(input_row, text="↑",
+        send_btn = tk.Button(input_frame, text="↑",
                              font=("Segoe UI", 12, "bold"),
                              bg=accent, fg="#ffffff",
                              activebackground=accent,
@@ -254,8 +287,13 @@ class MojoUI:
             row = tk.Frame(msg_frame, bg="#1c1c1e", pady=3, padx=10)
             row.pack(fill="x")
 
-            bubble = tk.Label(
+            bubble_frame = tk.Frame(
                 row,
+                bg="#27272a" if is_mojo else accent,
+                relief="ridge", bd=1
+            )
+            bubble = tk.Label(
+                bubble_frame,
                 text=text,
                 wraplength=220,
                 font=("Segoe UI", 11),
@@ -264,15 +302,18 @@ class MojoUI:
                 justify="left",
                 padx=12, pady=8,
             )
+            bubble.pack()
 
             if is_mojo:
-                bubble.pack(anchor="w")
+                bubble_frame.pack(anchor="w")
             else:
-                bubble.pack(anchor="e")
+                bubble_frame.pack(anchor="e")
 
         # ── LLM reply logic ───────────────────────────────────────────────────
-        decision = {"result": None}   # "grant" or "deny"
+        decision = {"result": None}   # "grant", "deny", or "close"
         user_turns = {"count": 0}
+        MAX_USER_TURNS  = 5   # Auto-deny after this many turns with no resolution
+        MIN_TURNS_TO_DENY = 3 # [DENY_ACCESS] won't close the app until this many turns
 
         def _llm_reply(user_msg: str):
             typing_var.set("Mojo is typing...")
@@ -289,75 +330,153 @@ class MojoUI:
                     raw     = resp["message"]["content"]
 
                     def _parse_duration_minutes(text: str) -> int:
-                        # Find a number (minutes) in the response. Cap to 20.
+                        # Find a number (minutes) in the response. Allow any duration requested by user.
                         m = re.search(r"(\d+)\s*(min|mins|minutes)?", text, re.IGNORECASE)
                         if m:
                             try:
                                 val = int(m.group(1))
-                                return max(1, min(val, 20))
+                                return max(1, val)  # Allow any duration >= 1 minute
                             except Exception:
                                 pass
                         return 1
 
                     duration_mins = _parse_duration_minutes(raw)
                     # Hide internal tags from the user view
-                    visible = re.sub(r"\[GRANT_ACCESS.*?\]", "", raw, flags=re.IGNORECASE).strip()
-                    visible = re.sub(r"\[DENY_ACCESS\]", "", visible, flags=re.IGNORECASE).strip()
+                    visible = re.sub(r"\[GRANT_ACCESS.*?\]", "", raw, flags=re.IGNORECASE)
+                    visible = re.sub(r"\[DENY_ACCESS\]", "", visible, flags=re.IGNORECASE)
+                    visible = re.sub(r"\[CLOSE_NOW\]", "", visible, flags=re.IGNORECASE)
+                    visible = visible.strip()
+                    # If nothing left after removing tags, use a default message
+                    if not visible:
+                        visible = "Got it ✓"
 
                     chat_history.append({"role": "assistant", "content": raw})
 
-                    win.after(0, lambda: _add_message("mojo", visible))
-                    win.after(0, lambda: typing_var.set(""))
-                    win.after(0, lambda: send_btn.config(state="normal"))
-                    win.after(0, lambda: entry.config(state="normal"))
-                    win.after(0, lambda: entry.focus_set())
+                    def safe_add_message():
+                        try:
+                            if win.winfo_exists():
+                                _add_message("mojo", visible)
+                        except Exception:
+                            pass
+
+                    def safe_clear_typing():
+                        try:
+                            if win.winfo_exists():
+                                typing_var.set("")
+                        except Exception:
+                            pass
+
+                    def safe_enable_send():
+                        try:
+                            if win.winfo_exists():
+                                send_btn.config(state="normal")
+                        except Exception:
+                            pass
+
+                    def safe_enable_entry():
+                        try:
+                            if win.winfo_exists():
+                                entry.config(state="normal")
+                        except Exception:
+                            pass
+
+                    def safe_focus_entry():
+                        try:
+                            if win.winfo_exists():
+                                entry.focus_set()
+                        except Exception:
+                            pass
+
+                    win.after(0, safe_add_message)
+                    win.after(0, safe_clear_typing)
+                    win.after(0, safe_enable_send)
+                    win.after(0, safe_enable_entry)
+                    win.after(0, safe_focus_entry)
 
                     # Check for explicit decision tags
-                    if "[GRANT_ACCESS" in raw.upper():
+                    raw_up = raw.upper()
+                    if "[CLOSE_NOW]" in raw_up:
+                        # Immediate close — user asked for it
+                        decision["result"] = "close"
+                        win.after(500, lambda: _resolve(-1))
+                    elif "[GRANT_ACCESS" in raw_up:
+                        # Break granted — act immediately
                         decision["result"] = "grant"
-                        win.after(1500, lambda: _resolve(duration_mins))
-                    elif "[DENY_ACCESS]" in raw.upper():
-                        decision["result"] = "deny"
-                        win.after(1500, _resolve)
+                        win.after(800, lambda: _resolve(duration_mins))
+                    elif "[DENY_ACCESS]" in raw_up:
+                        if user_turns["count"] >= MIN_TURNS_TO_DENY:
+                            # Enough conversation — close now
+                            print(f"[LLM] DENY after {user_turns['count']} turns — closing")
+                            decision["result"] = "deny"
+                            win.after(800, lambda: _resolve(-1))
+                        else:
+                            # Still early in conversation — keep talking, don't close yet
+                            print(f"[LLM] DENY seen at turn {user_turns['count']} — holding off (need {MIN_TURNS_TO_DENY})")
                     else:
-                        # If the model didn't include a tag, infer intent from phrasing.
-                        low = raw.lower()
-                        if "grant" in low and "access" in low:
-                            decision["result"] = "grant"
-                            print("MojoUI: inferred grant from response")
-                            win.after(1500, lambda: _resolve(duration_mins))
-                        elif "deny" in low or "no" in low or "dont" in low or "don\'t" in low:
-                            # Avoid false negatives by requiring a clear negative.
-                            if "access" in low or "permission" in low or "close" in low or "work" in low:
-                                decision["result"] = "deny"
-                                print("MojoUI: inferred deny from response")
-                                win.after(1500, _resolve)
-
-                    # Hard cap: if user has already replied 3 times and
-                    # LLM still hasn't granted access, auto-deny.
-                    if user_turns["count"] >= 3 and decision["result"] is None:
-                        print("MojoUI: max turns reached, auto-deny.")
-                        decision["result"] = "deny"
-                        win.after(800, _resolve)
+                        # LLM forgot to include a tag — check turn limit
+                        print(f"[LLM] No action tag. Turn {user_turns['count']}/{MAX_USER_TURNS}")
+                        if user_turns["count"] >= MAX_USER_TURNS:
+                            print("[LLM] Max turns reached — auto-denying")
+                            decision["result"] = "deny"
+                            def _auto_deny_msg():
+                                try:
+                                    if win.winfo_exists():
+                                        _add_message("mojo", "Alright, closing it. Back to work!")
+                                except Exception:
+                                    pass
+                            win.after(0, _auto_deny_msg)
+                            win.after(1200, lambda: _resolve(-1))
 
                 except Exception as e:
                     print(f"Chat LLM error: {e}")
-                    win.after(0, lambda: typing_var.set(""))
-                    win.after(0, lambda: send_btn.config(state="normal"))
-                    win.after(0, lambda: entry.config(state="normal"))
+                    # On LLM error, auto-deny so the distraction gets closed
+                    decision["result"] = "deny"
+                    def safe_error_clear():
+                        try:
+                            if win.winfo_exists():
+                                typing_var.set("")
+                                send_btn.config(state="normal")
+                                entry.config(state="normal")
+                                _add_message("mojo", "Error talking to AI — closing it anyway.")
+                        except Exception:
+                            pass
+                    win.after(0, safe_error_clear)
+                    win.after(1500, lambda: _resolve(-1))
 
             threading.Thread(target=_run, daemon=True).start()
 
         def _resolve(duration_minutes: int = 1):
-            win.destroy()
-            if decision["result"] == "grant":
-                if on_valid_reason:
-                    on_valid_reason(duration_minutes)
-            else:
-                if on_invalid:
-                    on_invalid(target_exe, target_hwnd)
-            if on_close:
-                on_close()
+            try:
+                if not win.winfo_exists():
+                    return
+                win.destroy()
+            except Exception:
+                pass
+            
+            try:
+                # CRITICAL: Grant and Close are MUTUALLY EXCLUSIVE
+                if decision["result"] == "grant":
+                    # GRANT: Give break, DO NOT close
+                    print(f"[_resolve] ✓ GRANTING {duration_minutes}min break - APP STAYS OPEN")
+                    if on_valid_reason:
+                        on_valid_reason(duration_minutes)
+                elif decision["result"] in ("close", "deny") or duration_minutes == -1:
+                    # CLOSE/DENY: Close the app, DO NOT grant break
+                    print(f"[_resolve] ✗ DENYING - CLOSING distraction")
+                    if on_invalid:
+                        on_invalid(target_exe, target_hwnd)
+                else:
+                    print(f"[_resolve] WARNING: No decision made: {decision.get('result')}")
+            except Exception as e:
+                print(f"[_resolve] Callback error: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            try:
+                if on_close:
+                    on_close()
+            except Exception:
+                pass
 
         def _send(event=None):
             msg = entry.get().strip()
@@ -371,6 +490,8 @@ class MojoUI:
         send_btn.config(command=_send)
         entry.bind("<Return>", _send)
 
+
+
         # ── Open with Mojo's first message ────────────────────────────────────
         opening = (
             f"Yo, I caught you on {target_exe or 'something'} 👀\n"
@@ -381,13 +502,39 @@ class MojoUI:
         _add_message("mojo", opening)
         chat_history.append({"role": "assistant", "content": opening})
 
-        # ── Centre on screen ──────────────────────────────────────────────────
+        # ── Position attached to orb ───────────────────────────────────────────
         win.update_idletasks()
-        sw = win.winfo_screenwidth()
-        sh = win.winfo_screenheight()
-        ww = win.winfo_reqwidth()
-        wh = win.winfo_reqheight()
-        win.geometry(f"360x420+{(sw - 360) // 2}+{(sh - 420) // 2}")
+        orb_x = self.root.winfo_x()
+        orb_y = self.root.winfo_y()
+        orb_width = self.root.winfo_width()
+        orb_height = self.root.winfo_height()
+        chat_width = 550
+        chat_height = 700
+
+        # Place above the orb, centered horizontally
+        chat_x = orb_x + (orb_width // 2) - (chat_width // 2)
+        chat_y = orb_y - chat_height
+
+        # If not enough space above, place below
+        if chat_y < 0:
+            chat_y = orb_y + orb_height
+
+        offset_x = chat_x - orb_x
+        offset_y = chat_y - orb_y
+
+        win.geometry(f"{chat_width}x{chat_height}+{chat_x}+{chat_y}")
+
+        # Bind to orb movement
+        def _update_chat_position(event=None):
+            if win.winfo_exists():
+                new_orb_x = self.root.winfo_x()
+                new_orb_y = self.root.winfo_y()
+                new_chat_x = new_orb_x + offset_x
+                new_chat_y = new_orb_y + offset_y
+                win.geometry(f"{chat_width}x{chat_height}+{new_chat_x}+{new_chat_y}")
+
+        self.root.bind('<Configure>', _update_chat_position)
+
         win.protocol("WM_DELETE_WINDOW", lambda: None)
 
         return win
@@ -396,6 +543,7 @@ class MojoUI:
 
     def _tick(self):
         self._draw_orb()
+        self._update_timer()
         self._t += 1
         self.root.after(33, self._tick)
 
@@ -438,6 +586,126 @@ class MojoUI:
         hy  = CY - int(R * 0.28)
         self.canvas.create_oval(hx-hr2, hy-hr2, hx+hr2, hy+hr2,
                                 fill="#ffffff", outline="")
+
+    def _update_timer(self):
+        """Update or show/hide grace period timer popup window."""
+        if not self.app:
+            return
+
+        current_time = time.time()
+        is_grace_active = self.app.grace_period_until > current_time
+
+        # Hide timer if grace period expired
+        if not is_grace_active:
+            if self.timer_window:
+                try:
+                    self._timer_fade_out()
+                except Exception:
+                    pass
+            return
+
+        # Compute remaining time text
+        remaining = max(0, self.app.grace_period_until - current_time)
+        mins = int(remaining) // 60
+        secs = int(remaining) % 60
+        timer_text = f"⏱ {mins}:{secs:02d}"
+
+        # Build the minimal pill on first call
+        if not self.timer_window:
+            self._timer_total   = remaining
+            self._timer_drag_dx = 0
+            self._timer_drag_dy = 0
+            self._timer_detached = False
+
+            tw = tk.Toplevel(self.root)
+            tw.overrideredirect(True)
+            tw.attributes("-topmost", True)
+            tw.attributes("-alpha", 0.0)
+            tw.config(bg="#111318")
+            self.timer_window = tw
+
+            self._timer_label = tk.Label(
+                tw,
+                text=timer_text,
+                font=("Segoe UI", 10),
+                fg="#94a3b8",
+                bg="#111318",
+                padx=10, pady=4,
+            )
+            self._timer_label.pack()
+
+            # Drag support
+            def _td_start(e):
+                self._timer_drag_dx = e.x
+                self._timer_drag_dy = e.y
+            def _td_move(e):
+                nx = tw.winfo_x() + e.x - self._timer_drag_dx
+                ny = tw.winfo_y() + e.y - self._timer_drag_dy
+                tw.geometry(f"+{nx}+{ny}")
+                self._timer_detached = True
+            self._timer_label.bind("<Button-1>",  _td_start)
+            self._timer_label.bind("<B1-Motion>", _td_move)
+
+            self._timer_fade_in()
+
+        try:
+            if not self.timer_window.winfo_exists():
+                self.timer_window = None
+                return
+
+            # Update text
+            self._timer_label.config(text=timer_text)
+
+            # Snap above orb unless user dragged it somewhere
+            if not self._timer_detached:
+                tw = self.timer_window
+                tw.update_idletasks()
+                pw = tw.winfo_reqwidth()
+                orb_x = self.root.winfo_x()
+                orb_y = self.root.winfo_y()
+                orb_w = self.root.winfo_width()
+                tx = orb_x + (orb_w - pw) // 2
+                ty = orb_y - tw.winfo_reqheight() - 6
+                tw.geometry(f"+{tx}+{ty}")
+
+        except Exception:
+            pass
+
+
+
+    def _timer_fade_in(self, alpha=0.0):
+        try:
+            if self.timer_window and self.timer_window.winfo_exists():
+                alpha = min(alpha + 0.08, 0.95)
+                self.timer_window.attributes("-alpha", alpha)
+                if alpha < 0.95:
+                    self.root.after(20, lambda: self._timer_fade_in(alpha))
+        except Exception:
+            pass
+
+    def _timer_fade_out(self, alpha=None):
+        try:
+            if alpha is None:
+                alpha = float(self.timer_window.attributes("-alpha")) if self.timer_window else 0.0
+            if self.timer_window and self.timer_window.winfo_exists() and alpha > 0:
+                alpha = max(0.0, alpha - 0.1)
+                self.timer_window.attributes("-alpha", alpha)
+                self.root.after(20, lambda: self._timer_fade_out(alpha))
+            else:
+                if self.timer_window:
+                    try:
+                        self.timer_window.destroy()
+                    except Exception:
+                        pass
+                    self.timer_window = None
+                    self._timer_detached = False
+        except Exception:
+            if self.timer_window:
+                try:
+                    self.timer_window.destroy()
+                except Exception:
+                    pass
+                self.timer_window = None
 
     # ── Speech bubbles ─────────────────────────────────────────────────────────
 
