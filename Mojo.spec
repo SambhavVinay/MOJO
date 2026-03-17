@@ -31,7 +31,7 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['C:\\Users\\Sambhav\\Desktop\\Mojo - Copy\\mojo_changed.py'],
+    ['C:\\Users\\Sambhav\\Desktop\\Mojo - Copy\\setup_mojo.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,

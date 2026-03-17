@@ -4,7 +4,7 @@ import json
 import tkinter as tk
 from tkinter import messagebox
 from dotenv import load_dotenv
-
+import random 
 load_dotenv()  # load .env into os.environ
 import threading
 import mss

@@ -14,10 +14,10 @@ import re
 import tkinter as tk
 import tkinter.font as tkfont
 import math
-import random
 import time
 import threading
-import ollama
+import google.genai as genai
+import os
 
 
 # ── Personality messages ───────────────────────────────────────────────────────
@@ -76,27 +76,26 @@ BUBBLE_GAP          = 12
 # ── Mojo's chat personality system prompt ─────────────────────────────────────
 CHAT_SYSTEM = """You are Mojo — a chill but honest productivity buddy. The user just got caught on something distracting.
 
-Your job: have a short, natural conversation to figure out if they deserve a break or not. Don't be robotic, don't lecture.
+Your job: have a short, natural, human-like conversation to figure out if they deserve a break or not. 
+Talk like a real friend. Keep it brief (1 or 2 short sentences). No robotic structures or bullet points.
 
-⚠️ HARD RULES (always followed):
-- Every single response MUST end with ONE tag: [CLOSE_NOW] or [GRANT_ACCESS n] or [DENY_ACCESS]. No exceptions.
-- [GRANT_ACCESS n] = break approved, app stays open for n minutes. ONLY after a genuinely valid reason AND duration given.
-- [DENY_ACCESS] = your current leaning, used as a placeholder while the conversation is still going too.
-- [CLOSE_NOW] = immediate close. Only when user explicitly says close it / sorry / my bad.
+⚠️ HARD RULES FOR THE SYSTEM (User won't see these tags):
+- Your response MUST END with exactly ONE of these tags: [CLOSE_NOW], [GRANT_ACCESS n], or [DENY_ACCESS].
+- [GRANT_ACCESS n] = You are giving them a break. 'n' is the number of minutes (e.g., [GRANT_ACCESS 5]). Only use this if they gave a valid reason AND you two agreed on a duration.
+- [DENY_ACCESS] = You are keeping the conversation going but you haven't given them a pass yet. Use this when asking "Why?" or "How long?"
+- [CLOSE_NOW] = You are shutting down the distraction right now because their excuse was bad or they admitted fault.
 
-VALID reasons (earn a break): genuinely tired after real work, bathroom, water/food, urgent message, earned rest after grinding.
-INVALID (close immediately, no second chance): "just listening to music", "just watching videos", "just chilling", bored, idk, vague, any bare entertainment with no context.
+VALID reasons (earn a break): genuinely tired after working hard, bathroom, getting water/food, urgent message, earned rest.
+INVALID (close immediately): "just listening to music", "just chilling", "bored", vague answers, endless scrolling.
 
-How to handle:
-1. Sorry / close it / my bad → brief reply, [CLOSE_NOW].
-2. No reason yet → ask what’s up. [DENY_ACCESS] as placeholder.
-3. VALID reason → ask "how long?", [DENY_ACCESS] while waiting.
-4. Duration given after valid reason → [GRANT_ACCESS n].
-5. INVALID reason (bare music/video/chill excuse) → short callout, close. [DENY_ACCESS].
-6. Funny / evasive → brief laugh, redirect, close. [DENY_ACCESS].
+Flow:
+1. They say "sorry" or admit fault → Say "No worries, back to the grind." ending with [CLOSE_NOW].
+2. They haven't given a reason → Ask "What's up?" ending with [DENY_ACCESS].
+3. They give a VALID reason but no time limit → Say "Fair enough, how many minutes do you need?" ending with [DENY_ACCESS].
+4. They give a valid reason AND a time limit (or answer your question) → Say "Alright, take 5." ending with [GRANT_ACCESS 5] (replace 5 with their number).
+5. They give an INVALID reason → Call them out gently and close it. "Nah, nice try. Close it." ending with [CLOSE_NOW].
 
-Tone: like texting a friend who genuinely wants you to focus. Short (max 20 words), real, never preachy.
-Always end with exactly one of: [CLOSE_NOW] | [GRANT_ACCESS n] | [DENY_ACCESS]
+Be brief and conversational!
 """
 
 
@@ -321,13 +320,33 @@ class MojoUI:
             entry.config(state="disabled")
 
             def _run():
-                chat_history.append({"role": "user", "content": user_msg})
-
-                messages = [{"role": "system", "content": CHAT_SYSTEM}] + chat_history
+                chat_history.append({"role": "user", "parts": [{"text": user_msg}]})
 
                 try:
-                    resp    = ollama.chat(model="llama3", messages=messages)
-                    raw     = resp["message"]["content"]
+                    # Setup Gemini Client
+                    api_key = os.environ.get("GEMINI_API_KEY")
+                    client = genai.Client(api_key=api_key)
+                    
+                    # Convert chat history to Gemini format, omitting the system prompt
+                    # we will pass the system prompt as system_instruction
+                    gemini_history = []
+                    for msg in chat_history:
+                        role = "model" if msg["role"] == "assistant" else "user"
+                        gemini_history.append({"role": role, "parts": msg["parts"]})
+
+                    response = client.models.generate_content(
+                        model='gemini-2.0-flash',
+                        contents=gemini_history,
+                        config=genai.types.GenerateContentConfig(
+                            system_instruction=CHAT_SYSTEM,
+                            temperature=0.7,
+                        )
+                    )
+                    
+                    if not response.text:
+                        raise Exception("Empty response from AI")
+                        
+                    raw = response.text
 
                     def _parse_duration_minutes(text: str) -> int:
                         # Find a number (minutes) in the response. Allow any duration requested by user.
@@ -348,9 +367,9 @@ class MojoUI:
                     visible = visible.strip()
                     # If nothing left after removing tags, use a default message
                     if not visible:
-                        visible = "Got it ✓"
+                        visible = "Got it."
 
-                    chat_history.append({"role": "assistant", "content": raw})
+                    chat_history.append({"role": "assistant", "parts": [{"text": raw}]})
 
                     def safe_add_message():
                         try:
@@ -495,12 +514,12 @@ class MojoUI:
         # ── Open with Mojo's first message ────────────────────────────────────
         opening = (
             f"Yo, I caught you on {target_exe or 'something'} 👀\n"
-            f"That's not on your goal list. What's the reason?"
+            f"What's the reason?"
         )
         if ocr_text.strip():
-            opening += f"\n\nFrom what I saw on screen: {ocr_text[:500]}..."
+            opening += f"\n\nFrom what I saw: {ocr_text[:300]}..."
         _add_message("mojo", opening)
-        chat_history.append({"role": "assistant", "content": opening})
+        chat_history.append({"role": "assistant", "parts": [{"text": opening}]})
 
         # ── Position attached to orb ───────────────────────────────────────────
         win.update_idletasks()
